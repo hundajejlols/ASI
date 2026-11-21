@@ -1,0 +1,99 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agh-asi.local/schemas/scan_result.schema.json",
+  "title": "ScanChunkResult",
+  "description": "Kontrakt wyniku przesyłanego z Scanner Worker -> Backend (/api/v1/scans/ingest).",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "scan_run_id",
+    "chunk_id",
+    "worker_id",
+    "status",
+    "started_at",
+    "finished_at",
+    "hosts"
+  ],
+  "properties": {
+    "schema_version": { "type": "string", "const": "1.0" },
+    "scan_run_id": { "type": "string", "format": "uuid" },
+    "chunk_id": { "type": "string", "format": "uuid" },
+    "worker_id": { "type": "string" },
+    "status": {
+      "type": "string",
+      "enum": ["completed", "requeued_window", "failed"]
+    },
+    "error_message": { "type": ["string", "null"] },
+    "started_at": { "type": "string", "format": "date-time" },
+    "finished_at": { "type": "string", "format": "date-time" },
+    "hosts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["ip", "is_up", "services"],
+        "properties": {
+          "ip": { "type": "string" },
+          "hostname": { "type": ["string", "null"] },
+          "is_up": { "type": "boolean" },
+          "services": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["port", "protocol", "state"],
+              "properties": {
+                "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+                "protocol": { "type": "string", "enum": ["tcp", "udp"] },
+                "state": { "type": "string", "enum": ["open", "filtered", "closed"] },
+                "service_name": { "type": ["string", "null"] },
+                "product": { "type": ["string", "null"] },
+                "version": { "type": ["string", "null"] },
+                "banner": { "type": ["string", "null"] },
+                "http": {
+                  "type": ["object", "null"],
+                  "properties": {
+                    "url": { "type": "string" },
+                    "scheme": { "type": "string", "enum": ["http", "https"] },
+                    "status_code": { "type": "integer" },
+                    "response_time_ms": { "type": ["integer", "null"] },
+                    "probe_error": { "type": ["string", "null"] },
+                    "title": { "type": ["string", "null"] },
+                    "redirect_chain": { "type": "array", "items": { "type": "string" } },
+                    "headers": { "type": "object", "additionalProperties": { "type": "string" } },
+                    "cookies": { "type": "array", "items": { "type": "string" } },
+                    "favicon_mmh3_hash": { "type": ["string", "null"] },
+                    "tls": {
+                      "type": ["object", "null"],
+                      "properties": {
+                        "subject": { "type": "string" },
+                        "issuer": { "type": "string" },
+                        "not_after": { "type": "string", "format": "date-time" },
+                        "san": { "type": "array", "items": { "type": "string" } },
+                        "is_self_signed": { "type": "boolean" }
+                      }
+                    },
+                    "technologies": { "type": "array", "items": { "type": "string" } },
+                    "tech_confidence": { "type": "object", "additionalProperties": { "type": "string" } },
+                    "is_admin_panel": { "type": "boolean" },
+                    "is_staging_env": { "type": "boolean" }
+                  }
+                },
+                "signature_matches": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "required": ["signature_id", "signature_name", "evidence"],
+                    "properties": {
+                      "signature_id": { "type": "string", "format": "uuid" },
+                      "signature_name": { "type": "string" },
+                      "evidence": { "type": "string" }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

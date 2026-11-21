@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agh-asi.local/schemas/scan_job.schema.json",
+  "title": "ScanJobChunk",
+  "description": "Kontrakt zadania przesyłanego z Backend -> Redis -> Scanner Worker (pojedyncza paczka CIDR/hostów).",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "scan_run_id",
+    "chunk_id",
+    "target_cidr",
+    "profile",
+    "window_deadline_utc"
+  ],
+  "properties": {
+    "schema_version": { "type": "string", "const": "1.0" },
+    "scan_run_id": { "type": "string", "format": "uuid" },
+    "chunk_id": { "type": "string", "format": "uuid" },
+    "target_cidr": {
+      "type": "string",
+      "description": "Pojedyncza paczka np. 172.28.0.0/24 lub pojedynczy IP/domena"
+    },
+    "window_deadline_utc": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Po przekroczeniu tego czasu worker bezpiecznie przerywa skan i zwraca status requeued_window"
+    },
+    "profile": {
+      "type": "object",
+      "required": ["nmap_flags", "ports", "rate_limit_pps", "http_fingerprint_enabled"],
+      "properties": {
+        "nmap_flags": { "type": "string" },
+        "ports": { "type": "string" },
+        "rate_limit_pps": { "type": "integer", "minimum": 1 },
+        "http_fingerprint_enabled": { "type": "boolean" },
+        "signatures_enabled": { "type": "boolean" }
+      }
+    },
+    "signatures": {
+      "type": "array",
+      "description": "Aktywne pasywne sygnatury własne przekazane do workera",
+      "items": {
+        "type": "object",
+        "required": ["id", "name", "match_type", "pattern"],
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "name": { "type": "string" },
+          "severity": { "type": "string", "enum": ["info", "low", "medium", "high", "critical"] },
+          "match_type": {
+            "type": "string",
+            "enum": ["header", "cookie", "favicon_hash", "html_fragment", "path_probe", "footer_version"]
+          },
+          "pattern": { "type": "string" },
+          "probe_path": { "type": ["string", "null"] },
+          "expected_status": { "type": ["integer", "null"] }
+        }
+      }
+    }
+  }
+}

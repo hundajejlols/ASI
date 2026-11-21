@@ -1,0 +1,46 @@
+{
+  "schema_version": "1.0",
+  "scan_run_id": "11111111-1111-1111-1111-111111111111",
+  "chunk_id": "22222222-2222-2222-2222-222222222222",
+  "worker_id": "worker-01",
+  "status": "completed",
+  "error_message": null,
+  "started_at": "2026-11-21T22:00:05Z",
+  "finished_at": "2026-11-21T22:00:18Z",
+  "hosts": [
+    {
+      "ip": "172.28.0.10",
+      "hostname": "asi_lab_nginx",
+      "is_up": true,
+      "services": [
+        {
+          "port": 80,
+          "protocol": "tcp",
+          "state": "open",
+          "service_name": "http",
+          "product": "nginx",
+          "version": "1.27.2",
+          "banner": "nginx/1.27.2",
+          "http": {
+            "url": "http://172.28.0.10:80/",
+            "scheme": "http",
+            "status_code": 200,
+            "title": "Welcome to nginx!",
+            "redirect_chain": [],
+            "headers": {
+              "Server": "nginx/1.27.2",
+              "Content-Type": "text/html"
+            },
+            "cookies": [],
+            "favicon_mmh3_hash": null,
+            "tls": null,
+            "technologies": ["nginx"],
+            "is_admin_panel": false,
+            "is_staging_env": false
+          },
+          "signature_matches": []
+        }
+      ]
+    }
+  ]
+}
