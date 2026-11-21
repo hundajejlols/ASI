@@ -16,7 +16,7 @@ flowchart LR
     REDIS -->|"BLMove + recovery"| WORKER["Go Scanner Worker (non-root)"]
     WORKER -->|"nmap allowlist + HTTP/TLS FP + Passive Signatures (Host/SNI)"| LAB["Badana sieć / lab_net"]
     WORKER -->|"POST /api/v1/scans/ingest"| API
-    API -->|"POST /api/v2/import-scan/ & /reimport-scan/ (Generic Findings Import)"| DD["DefectDojo API v2"]
+    API -->|"POST /api/v2/reimport-scan/ (1 IP = 1 Asset, auto_create_context)"| DD["DefectDojo API v2"]
 ```
 
 ---
@@ -93,8 +93,9 @@ Wszystkie ręczne korekty analityków (`custom_label`, `owner_unit`, `criticalit
 - Pipeline `ingest_scan_result` (wspólny dla skanera Go, ręcznego formularza `POST /api/v1/scans/manual` oraz importu plików CSV/JSON `POST /api/v1/scans/import`) **nigdy nie modyfikuje ani nie usuwa** rekordów z `asset_overrides`.
 - Przy odczycie (`GET /api/v1/hosts`, `GET /api/v1/hosts/{id}`, `GET /api/v1/scans/export`) dane ze skanera są dynamicznie łączone z nadpisaniami.
 
-### 5.2. Inteligentny eksport do DefectDojo API v2
+### 5.2. Inteligentny eksport do DefectDojo API v2 (model `1 IP = 1 Asset`)
 Serwis [defectdojo.py](../backend/app/services/defectdojo.py) (`POST /api/v1/integrations/defectdojo/export`):
-1. **Filtruje szum:** automatycznie odrzuca hosty i usługi posiadające w `asset_overrides` flagę `is_ignored = true` lub `is_false_positive = true`.
-2. **Wzbogaca kontekst:** do opisu (`description`) i listy `tags` każdego znaleziska dołącza odszyfrowaną notatkę analityka, przypisaną jednostkę organizacyjną AGH oraz własną etykietę.
-3. **Generuje standardowy format:** tworzy dokument zgodny ze specyfikacją **Generic Findings Import (JSON)** ze stabilnym kluczem deduplikacji `unique_id_from_tool`, sprawdza w `GET /api/v2/tests/` czy istnieje już test `Janus ASI — Attack Surface Intelligence` w danym Engagement i przesyła raport do `POST /api/v2/import-scan/` (pierwszy eksport) lub `POST /api/v2/reimport-scan/` (kolejne eksporty z deduplikacją) — albo zwraca podgląd w trybie `dry_run: true`.
+1. **Izoluje zasoby per IP (RBAC w DefectDojo):** każdy adres IP trafia do własnego **Assetu (`Product`)** w DefectDojo (`product_name = <IP>`), co pozwala przydzielać uprawnienia administratorom poszczególnych serwerów niezależnie od reszty sieci.
+2. **Mapuje Organizację (`Product Type`):** przy tworzeniu nowego Assetu używa `owner_unit` z `asset_overrides` (np. wydział/jednostka AGH), a w przypadku jego braku — domyślnej organizacji z konfiguracji integracji. Dla Assetów już istniejących w DefectDojo (`GET /api/v2/products/?name_exact=<IP>`) pomija `product_type_name`, aby ręczne przeniesienie Assetu do innej organizacji w DefectDojo nigdy nie powodowało błędu konfliktu.
+3. **Filtruje szum i wzbogaca kontekst:** automatycznie odrzuca hosty `offline`/`archived` oraz zasoby z flagą `is_ignored = true` lub `is_false_positive = true`, a do opisu i tagów dołącza odszyfrowaną notatkę analityka, jednostkę właściciela oraz własną etykietę.
+4. **Automatyzuje cykl życia znalezisk per IP:** generuje dla każdego IP osobny raport **Generic Findings Import (JSON)** ze stabilnym `unique_id_from_tool` i wysyła go do `POST /api/v2/reimport-scan/` z `auto_create_context=true` (automatyczne utworzenie brakującego `Product_Type` / `Product` / `Engagement` / `Test` oraz deduplikacja i bezpieczne `close_old_findings` ograniczone wyłącznie do danego IP) — albo zwraca podgląd per Asset w trybie `dry_run: true`.

@@ -1,22 +1,20 @@
 import {
   Activity,
   AlertCircle,
-  BarChart3,
   CheckCircle2,
   Clock,
   Download,
   Layers,
-  Moon,
   Play,
   Radar,
   Server,
   Shield,
-  Sun,
 } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { apiFetch, downloadExport, hasPermission } from '../api';
 import type { ChangeEvent, DashboardSummary, HostSummary, ScanRunInfo, UserRole } from '../types';
 import { ChangeTypeBadge, formatTime, HostStatusBadge, SeverityBadge } from './Badges';
+import { ChangesTimelineChart } from './ChangesTimelineChart';
 import { Alert, AlertDescription } from './ui/alert';
 import { Badge } from './ui/badge';
 import { Button } from './ui/button';
@@ -67,7 +65,6 @@ export function DashboardTab({ role, hosts, changes, summary, onRefresh }: Props
     .sort((a, b) => (b.priority_score ?? 0) - (a.priority_score ?? 0));
 
   const timeline = summary?.changes_timeline ?? [];
-  const maxTimelineVal = Math.max(1, ...timeline.map((d) => d.total));
   const activeGroups = summary?.service_groups?.[groupMode] ?? [];
   const dayStats = summary?.time_of_day_analysis.day_06_22;
   const nightStats = summary?.time_of_day_analysis.night_22_06;
@@ -220,58 +217,12 @@ export function DashboardTab({ role, hosts, changes, summary, onRefresh }: Props
 
       {/* Wizualizacja zmian w czasie + Pora dnia (Dzień vs Noc) + Grupowanie usług */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-        <Card className="lg:col-span-2">
-          <CardHeader className="px-4 py-3 border-b border-border flex-row items-center justify-between space-y-0">
-            <CardTitle className="text-xs uppercase tracking-wider text-muted-foreground flex items-center gap-1.5">
-              <BarChart3 className="h-3.5 w-3.5" />
-              Wizualizacja zmian w czasie &amp; Pora dnia (14 dni)
-            </CardTitle>
-            {dayStats && nightStats && (
-              <div className="flex items-center gap-3 text-[11px] font-mono text-muted-foreground">
-                <span className="flex items-center gap-1">
-                  <Sun className="h-3 w-3" /> Dzień (06–22): <strong className="text-foreground">{dayStats.total}</strong>
-                </span>
-                <span className="flex items-center gap-1">
-                  <Moon className="h-3 w-3" /> Noc (22–06): <strong className="text-foreground">{nightStats.total}</strong>
-                </span>
-              </div>
-            )}
-          </CardHeader>
-          <CardContent className="p-4">
-            {timeline.length > 0 ? (
-              <div className="flex items-end gap-2 h-32 pt-4">
-                {timeline.map((bucket) => {
-                  const pct = Math.max(8, Math.round((bucket.total / maxTimelineVal) * 100));
-                  const highPct = bucket.total > 0 ? Math.round((bucket.high_or_med / bucket.total) * 100) : 0;
-                  return (
-                    <div key={bucket.date} className="flex-1 flex flex-col items-center gap-1 min-w-[36px]">
-                      <span className="text-[10px] font-mono text-muted-foreground">{bucket.total}</span>
-                      <div
-                        className="w-full max-w-[34px] rounded-t bg-primary/80 relative overflow-hidden transition-all"
-                        style={{ height: `${pct}%` }}
-                        title={`${bucket.date}: łącznie ${bucket.total} (nowe: ${bucket.new}, offline: ${bucket.offline}, med/high: ${bucket.high_or_med})`}
-                      >
-                        {highPct > 0 && (
-                          <div
-                            className="absolute bottom-0 inset-x-0 bg-amber-500/80"
-                            style={{ height: `${highPct}%` }}
-                          />
-                        )}
-                      </div>
-                      <span className="text-[10px] font-mono text-muted-foreground truncate">
-                        {bucket.date.slice(5)}
-                      </span>
-                    </div>
-                  );
-                })}
-              </div>
-            ) : (
-              <div className="h-28 flex items-center justify-center text-xs text-muted-foreground">
-                Brak zdarzeń w ostatnich 14 dniach.
-              </div>
-            )}
-          </CardContent>
-        </Card>
+        <ChangesTimelineChart
+          role={role}
+          initialTimeline={timeline}
+          dayStats={dayStats}
+          nightStats={nightStats}
+        />
 
         <Card>
           <CardHeader className="px-4 py-3 border-b border-border space-y-2">

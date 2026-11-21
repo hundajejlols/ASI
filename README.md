@@ -82,18 +82,18 @@ Domyślne konta demo (tabela `users`): `admin / admin123!`, `operator / operator
 
 ---
 
-## 5. Podpięcie prawdziwej instancji DefectDojo (API v2)
+## 5. Podpięcie prawdziwej instancji DefectDojo (API v2 — model `1 IP = 1 Asset`)
 
 Kontener `backend` posiada skonfigurowane mapowanie `host.docker.internal:host-gateway`, dzięki czemu z wnętrza Dockera może łączyć się zarówno z DefectDojo uruchomionym lokalnie na hoście, jak i ze zdalną instancją uczelnianą.
 
+Każdy skanowany adres IP trafia do **własnego Assetu (`Product`)** w DefectDojo (`product_name = <IP>`), dzięki czemu administratorzy poszczególnych serwerów mogą otrzymywać osobne uprawnienia RBAC wyłącznie do swoich zasobów.
+
 1. **Wygenerowanie klucza API v2 w DefectDojo:**
-   - Zaloguj się do DefectDojo → kliknij menu użytkownika w prawym górnym rogu → wybierz **API v2 Key** i skopiuj wygenerowany token.
-2. **Pobranie `Engagement ID`:**
-   - W DefectDojo otwórz docelowy *Product* → zakładka *Engagements* → wejdź w wybrany Engagement. Numer ID znajduje się w adresie URL: `/engagement/<ID>` (np. `1`).
-3. **Konfiguracja i test w Janus ASI UI (`http://localhost:3000` → zakładka *DefectDojo*):**
+   - Zaloguj się do DefectDojo (konto serwisowe z uprawnieniami do tworzenia Produktów/Assetów w docelowym Product Type) → kliknij menu użytkownika w prawym górnym rogu → wybierz **API v2 Key** i skopiuj wygenerowany token.
+2. **Konfiguracja i test w Janus ASI UI (`http://localhost:3000` → zakładka *DefectDojo*):**
    - Przełącz rolę RBAC w górnym pasku na `admin`.
    - Wpisz **Base URL**:
      - `http://host.docker.internal:8080` (dla DefectDojo działającego lokalnie na porcie `8080` hosta), lub
      - `https://defectdojo.agh.edu.pl` (dla instancji zewnętrznej).
-   - Podaj **Engagement ID**, wklej **Token API v2** i kliknij **Zapisz konfigurację** (token zostanie zaszyfrowany algorytmem `AES-256-GCM`), a następnie kliknij **Test Connection**.
-   - W panelu po prawej stronie możesz wybrać konkretne hosty (lub wszystkie), wygenerować podgląd raportu (`Dry-Run`), a po odznaczeniu `Dry-Run` wysłać obserwacje bezpośrednio do DefectDojo API v2 (`POST /api/v2/import-scan/` przy pierwszym eksporcie oraz `POST /api/v2/reimport-scan/` przy kolejnych eksportach z deduplikacją, `scan_type="Generic Findings Import"`).
+   - Ustaw **Domyślną Organizację (Product Type)** (np. `AGH Attack Surface` — dla hostów z ustawionym `owner_unit` w `asset_overrides` używane jest `owner_unit`), **Nazwę Engagement (per Asset)** (np. `Janus ASI — Attack Surface`), wklej **Token API v2** i kliknij **Zapisz konfigurację** (token zostanie zaszyfrowany algorytmem `AES-256-GCM`), a następnie kliknij **Test Connection**.
+   - W panelu po prawej stronie możesz wyszukać i wybrać konkretne hosty (lub wszystkie), wygenerować podgląd raportu per Asset (`Dry-Run`), a po odznaczeniu `Dry-Run` zsynchronizować każdy IP z osobnym Assetem w DefectDojo API v2 (`POST /api/v2/reimport-scan/` z `auto_create_context=true`, `scan_type="Generic Findings Import"`). Istniejące Assety zachowują organizację ustawioną ręcznie w DefectDojo.

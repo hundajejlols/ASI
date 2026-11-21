@@ -12,6 +12,9 @@ from app.db.models import Integration
 from app.db.session import get_db
 from app.services.audit import record_audit_event
 from app.services.defectdojo import (
+    DEFAULT_ENGAGEMENT_NAME,
+    DEFAULT_MAX_EXPORT_ASSETS,
+    DEFAULT_PRODUCT_TYPE_NAME,
     DEFECTDOJO_INTEGRATION_NAME,
     export_to_defectdojo,
     get_defectdojo_integration,
@@ -25,8 +28,8 @@ router = APIRouter(prefix="/integrations/defectdojo", tags=["integrations"])
 class DefectDojoConfigStatusOut(BaseModel):
     configured: bool
     base_url: str | None = None
-    engagement_id: int | None = None
-    product_name: str | None = None
+    product_type_name: str = DEFAULT_PRODUCT_TYPE_NAME
+    engagement_name: str = DEFAULT_ENGAGEMENT_NAME
     verify_tls: bool = True
     is_active: bool = False
     has_api_token: bool = False
@@ -35,8 +38,18 @@ class DefectDojoConfigStatusOut(BaseModel):
 
 class DefectDojoConfigPutRequest(BaseModel):
     base_url: str = Field(..., min_length=8, description="Np. https://defectdojo.agh.edu.pl")
-    engagement_id: int = Field(..., ge=1)
-    product_name: str | None = None
+    product_type_name: str = Field(
+        default=DEFAULT_PRODUCT_TYPE_NAME,
+        min_length=1,
+        max_length=255,
+        description="Domyślna Organizacja (Product Type) w DefectDojo dla nowo tworzonych Assetów per IP (nadpisywana przez owner_unit z asset_overrides).",
+    )
+    engagement_name: str = Field(
+        default=DEFAULT_ENGAGEMENT_NAME,
+        min_length=1,
+        max_length=255,
+        description="Nazwa Engagement automatycznie tworzonego w obrębie każdego Assetu (IP).",
+    )
     verify_tls: bool = True
     is_active: bool = True
     api_token: str | None = Field(
@@ -51,6 +64,7 @@ class DefectDojoExportRequest(BaseModel):
     only_interesting: bool = False
     close_old_findings: bool | None = None
     dry_run: bool = False
+    max_assets: int = Field(default=DEFAULT_MAX_EXPORT_ASSETS, ge=1, le=5000)
 
 
 def _to_status_out(integration: Integration | None) -> DefectDojoConfigStatusOut:
@@ -59,8 +73,8 @@ def _to_status_out(integration: Integration | None) -> DefectDojoConfigStatusOut
     return DefectDojoConfigStatusOut(
         configured=True,
         base_url=integration.base_url,
-        engagement_id=integration.default_engagement_id,
-        product_name=integration.product_name,
+        product_type_name=integration.product_type_name or DEFAULT_PRODUCT_TYPE_NAME,
+        engagement_name=integration.engagement_name or DEFAULT_ENGAGEMENT_NAME,
         verify_tls=integration.verify_tls,
         is_active=integration.is_active,
         has_api_token=bool(integration.api_token_encrypted),
@@ -92,6 +106,19 @@ def put_defectdojo_config(
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
 
+    clean_product_type = payload.product_type_name.strip()
+    clean_engagement_name = payload.engagement_name.strip()
+    if not clean_product_type:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Pole product_type_name (Organizacja / Product Type) nie może być puste.",
+        )
+    if not clean_engagement_name:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Pole engagement_name nie może być puste.",
+        )
+
     integration = get_defectdojo_integration(db)
     if integration is None:
         if not payload.api_token:
@@ -104,16 +131,16 @@ def put_defectdojo_config(
             provider="defectdojo",
             base_url=clean_base_url,
             api_token_encrypted=encrypt_field(payload.api_token, associated_data=AAD_INTEGRATION_TOKEN),
-            product_name=payload.product_name,
-            default_engagement_id=payload.engagement_id,
+            product_type_name=clean_product_type,
+            engagement_name=clean_engagement_name,
             verify_tls=payload.verify_tls,
             is_active=payload.is_active,
         )
         db.add(integration)
     else:
         integration.base_url = clean_base_url
-        integration.default_engagement_id = payload.engagement_id
-        integration.product_name = payload.product_name
+        integration.product_type_name = clean_product_type
+        integration.engagement_name = clean_engagement_name
         integration.verify_tls = payload.verify_tls
         integration.is_active = payload.is_active
         if payload.api_token:
@@ -126,7 +153,12 @@ def put_defectdojo_config(
         action="integration.defectdojo.config",
         resource_type="integration",
         resource_id=DEFECTDOJO_INTEGRATION_NAME,
-        details={"base_url": clean_base_url, "engagement_id": payload.engagement_id, "token_updated": bool(payload.api_token)},
+        details={
+            "base_url": clean_base_url,
+            "product_type_name": clean_product_type,
+            "engagement_name": clean_engagement_name,
+            "token_updated": bool(payload.api_token),
+        },
     )
     db.commit()
     db.refresh(integration)
@@ -138,7 +170,7 @@ def test_defectdojo(
     db: Session = Depends(get_db),
     _principal: Principal = Depends(require_permission("manage_integrations")),
 ) -> dict[str, Any]:
-    """Testuje połączenie z DefectDojo API v2 (GET /api/v2/engagements/{engagement_id}/)."""
+    """Testuje połączenie z DefectDojo API v2 (GET /api/v2/product_types/)."""
     integration = get_defectdojo_integration(db)
     if integration is None:
         raise HTTPException(
@@ -155,7 +187,8 @@ def export_defectdojo(
     principal: Principal = Depends(require_permission("modify")),
 ) -> dict[str, Any]:
     """
-    Eksport obserwacji do DefectDojo w formacie Generic Findings Import (JSON).
+    Eksport obserwacji do DefectDojo w formacie Generic Findings Import (JSON),
+    w modelu 1 IP = 1 Asset (Product).
     Dostępne dla ról: admin, add_delete_modify, modify_read.
     """
     try:
@@ -166,15 +199,24 @@ def export_defectdojo(
             only_interesting=payload.only_interesting,
             close_old_findings=payload.close_old_findings,
             dry_run=payload.dry_run,
+            max_assets=payload.max_assets,
         )
         if not payload.dry_run:
+            stats = res.get("stats") or {}
             record_audit_event(
                 db,
                 principal,
                 action="integration.defectdojo.export",
                 resource_type="defectdojo",
-                resource_id=str(res.get("test_id") or ""),
-                details={"mode": res.get("mode"), "findings": (res.get("stats") or {}).get("total_findings")},
+                resource_id=str(res.get("default_product_type_name") or ""),
+                details={
+                    "mode": res.get("mode"),
+                    "assets_exported": stats.get("assets_exported"),
+                    "assets_created": stats.get("assets_created"),
+                    "assets_updated": stats.get("assets_updated"),
+                    "assets_failed": stats.get("assets_failed"),
+                    "findings": stats.get("total_findings"),
+                },
             )
             db.commit()
         return res

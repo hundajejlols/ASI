@@ -441,7 +441,7 @@ def test_explicit_closed_port_latency_diff_and_infra_defectdojo():
     from app.db.models import ChangeEvent, Host, ScanRun, Service
     from app.db.session import SessionLocal
     from app.schemas.contract import HostResult, HTTPFingerprintResult, ScanChunkResult, ServiceResult
-    from app.services.defectdojo import build_generic_findings_report
+    from app.services.defectdojo import build_per_host_generic_findings_reports
     from app.services.ingest import ingest_scan_result
 
     test_ip = "198.51.100.88"
@@ -514,9 +514,12 @@ def test_explicit_closed_port_latency_diff_and_infra_defectdojo():
 
             h = db.execute(select(Host).where(Host.ip_address == cast(test_ip, INET))).scalar_one()
 
-            # DefectDojo only_interesting=True powinien wyeksportować wystawionego Redisa (6379) jako Medium!
-            dd_report, _ = build_generic_findings_report(db, host_ids=[h.id], only_interesting=True)
-            redis_findings = [f for f in dd_report["findings"] if ":6379" in f["title"]]
+            # DefectDojo only_interesting=True powinien wyeksportować wystawionego Redisa (6379) jako Medium w osobnym Assecie per IP!
+            dd_reports, dd_stats = build_per_host_generic_findings_reports(db, host_ids=[h.id], only_interesting=True)
+            assert len(dd_reports) == 1
+            assert dd_reports[0]["product_name"] == test_ip
+            assert dd_stats["assets_to_export"] == 1
+            redis_findings = [f for f in dd_reports[0]["payload"]["findings"] if ":6379" in f["title"]]
             assert len(redis_findings) == 1
             assert redis_findings[0]["severity"] == "Medium"
             assert "exposed-infra" in redis_findings[0]["tags"]
@@ -602,5 +605,205 @@ def test_explicit_closed_port_latency_diff_and_infra_defectdojo():
             assert len(closed_events) == 1
     finally:
         _cleanup()
+
+
+def test_defectdojo_per_ip_asset_export_and_org_mapping(monkeypatch):
+    """
+    Testuje model 1 IP = 1 Asset (Product) w integracji z DefectDojo API v2:
+      - każde IP generuje osobny Asset (product_name = czyste IP),
+      - Opcja A: owner_unit z asset_overrides -> product_type_name (fallback: domyślna organizacja),
+      - istniejący w DefectDojo Asset pomija product_type_name (ochrona przed błędem 400 po ręcznym przeniesieniu),
+      - nowy Asset otrzymuje best-effort PATCH opisu/tagów,
+      - każdy wyeksportowany host zapisuje własny rekord w defectdojo_exports z host_id i defectdojo_product_id.
+    """
+    from sqlalchemy import cast, select
+    from sqlalchemy.dialects.postgresql import INET
+    from app.core.crypto import AAD_INTEGRATION_TOKEN, encrypt_field
+    from app.db.models import AssetOverride, DefectDojoExport, Host, Integration, ScanRun
+    from app.db.session import SessionLocal
+    from app.schemas.contract import HostResult, ScanChunkResult, ServiceResult
+    import app.services.defectdojo as dd_mod
+    from app.services.ingest import ingest_scan_result
+
+    ip_new = "198.51.100.91"
+    ip_existing = "198.51.100.92"
+    run_id = uuid4()
+    created_integration = False
+    saved_prev_int: dict | None = None
+
+    def _cleanup():
+        with SessionLocal() as db:
+            for ip in (ip_new, ip_existing):
+                h = db.execute(select(Host).where(Host.ip_address == cast(ip, INET))).scalar_one_or_none()
+                if h:
+                    for ov in db.execute(select(AssetOverride).where(AssetOverride.entity_id == h.id)).scalars().all():
+                        db.delete(ov)
+                    for ex in db.execute(select(DefectDojoExport).where(DefectDojoExport.host_id == h.id)).scalars().all():
+                        db.delete(ex)
+                    db.delete(h)
+            sr = db.get(ScanRun, run_id)
+            if sr:
+                db.delete(sr)
+            integ = dd_mod.get_defectdojo_integration(db)
+            if created_integration and integ:
+                db.delete(integ)
+            elif saved_prev_int and integ:
+                integ.base_url = saved_prev_int["base_url"]
+                integ.product_type_name = saved_prev_int["product_type_name"]
+                integ.engagement_name = saved_prev_int["engagement_name"]
+                integ.is_active = saved_prev_int["is_active"]
+            db.commit()
+
+    _cleanup()
+    try:
+        now = datetime.now(timezone.utc)
+        with SessionLocal() as db:
+            ingest_scan_result(
+                db,
+                ScanChunkResult(
+                    scan_run_id=run_id,
+                    chunk_id=uuid4(),
+                    worker_id="worker-test",
+                    status="completed",
+                    started_at=now,
+                    finished_at=now,
+                    hosts=[
+                        HostResult(
+                            ip=ip_new,
+                            hostname="wieit-app.agh.edu.pl",
+                            is_up=True,
+                            services=[ServiceResult(port=80, protocol="tcp", state="open", service_name="http", product="nginx")],
+                        ),
+                        HostResult(
+                            ip=ip_existing,
+                            hostname="default-srv.agh.edu.pl",
+                            is_up=True,
+                            services=[ServiceResult(port=443, protocol="tcp", state="open", service_name="https", product="nginx")],
+                        ),
+                    ],
+                ),
+                is_partial=False,
+            )
+
+            h_new = db.execute(select(Host).where(Host.ip_address == cast(ip_new, INET))).scalar_one()
+            h_existing = db.execute(select(Host).where(Host.ip_address == cast(ip_existing, INET))).scalar_one()
+
+            db.add(
+                AssetOverride(
+                    entity_type="host",
+                    entity_id=h_new.id,
+                    custom_label="Serwer WIEiT",
+                    owner_unit="WIEiT",
+                    tags=["wydzial-wieit"],
+                )
+            )
+
+            integ = dd_mod.get_defectdojo_integration(db)
+            if integ is None:
+                created_integration = True
+                integ = Integration(
+                    name=dd_mod.DEFECTDOJO_INTEGRATION_NAME,
+                    provider="defectdojo",
+                    base_url="http://host.docker.internal:8080",
+                    api_token_encrypted=encrypt_field("test-dd-token", associated_data=AAD_INTEGRATION_TOKEN),
+                    product_type_name="AGH Attack Surface",
+                    engagement_name="Janus ASI — Attack Surface",
+                    verify_tls=False,
+                    is_active=True,
+                )
+                db.add(integ)
+            else:
+                saved_prev_int = {
+                    "base_url": integ.base_url,
+                    "product_type_name": integ.product_type_name,
+                    "engagement_name": integ.engagement_name,
+                    "is_active": integ.is_active,
+                }
+                integ.product_type_name = "AGH Attack Surface"
+                integ.engagement_name = "Janus ASI — Attack Surface"
+                integ.is_active = True
+            db.commit()
+
+            # 1. Dry-Run weryfikuje podział na 2 osobne Assety i mapowanie Organizacji (Opcja A)
+            dry = dd_mod.export_to_defectdojo(db, host_ids=[h_new.id, h_existing.id], dry_run=True)
+            assert dry["mode"] == "per_host_asset"
+            assert dry["stats"]["assets_to_export"] == 2
+            by_ip = {a["product_name"]: a for a in dry["assets"]}
+            assert by_ip[ip_new]["product_type_name"] == "WIEiT"
+            assert by_ip[ip_new]["product_type_source"] == "owner_unit"
+            assert by_ip[ip_existing]["product_type_name"] == "AGH Attack Surface"
+            assert by_ip[ip_existing]["product_type_source"] == "default"
+
+            # 2. Mockowany realny eksport weryfikuje auto_create_context i ochronę istniejącego Assetu przed konfliktem 400
+            recorded_posts: list[dict] = []
+            recorded_patches: list[tuple[str, dict]] = []
+
+            class _FakeResp:
+                def __init__(self, status_code: int, payload: dict):
+                    self.status_code = status_code
+                    self._payload = payload
+                    self.headers = {"content-type": "application/json"}
+                    self.text = str(payload)
+
+                def json(self):
+                    return self._payload
+
+            class _FakeClient:
+                def __init__(self, *args, **kwargs):
+                    pass
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *args):
+                    return False
+
+                def get(self, url, params=None, headers=None):
+                    if url.endswith("/api/v2/products/") and params and params.get("name_exact") == ip_existing:
+                        return _FakeResp(200, {"count": 1, "results": [{"id": 42, "name": ip_existing}]})
+                    return _FakeResp(200, {"count": 0, "results": []})
+
+                def post(self, url, headers=None, data=None, files=None):
+                    recorded_posts.append(dict(data or {}))
+                    pname = (data or {}).get("product_name")
+                    if pname == ip_new:
+                        return _FakeResp(201, {"product_id": 101, "product_type_id": 7, "engagement_id": 201, "test_id": 301})
+                    return _FakeResp(201, {"product_id": 42, "product_type_id": 9, "engagement_id": 202, "test_id": 302})
+
+                def patch(self, url, headers=None, json=None):
+                    recorded_patches.append((url, dict(json or {})))
+                    return _FakeResp(200, {"id": 101})
+
+            monkeypatch.setattr(dd_mod.httpx, "Client", _FakeClient)
+
+            res = dd_mod.export_to_defectdojo(db, host_ids=[h_new.id, h_existing.id], dry_run=False)
+            assert res["exported"] is True
+            assert res["partial_failure"] is False
+            assert res["stats"]["assets_exported"] == 2
+            assert res["stats"]["assets_created"] == 1
+            assert res["stats"]["assets_updated"] == 1
+
+            posts_by_prod = {p["product_name"]: p for p in recorded_posts}
+            assert posts_by_prod[ip_new]["product_type_name"] == "WIEiT"
+            assert posts_by_prod[ip_new]["auto_create_context"] == "true"
+            assert "product_type_name" not in posts_by_prod[ip_existing]
+            assert posts_by_prod[ip_existing]["auto_create_context"] == "true"
+
+            # PATCH tylko dla nowo utworzonego Assetu (101), bez nadpisywania istniejącego (42)
+            assert len(recorded_patches) == 1
+            assert recorded_patches[0][0].endswith("/api/v2/products/101/")
+            assert "wydzial-wieit" in recorded_patches[0][1]["tags"]
+
+            # W tabeli defectdojo_exports zapisano 2 osobne rekordy z host_id i defectdojo_product_id
+            exp_rows = db.execute(
+                select(DefectDojoExport).where(DefectDojoExport.host_id.in_([h_new.id, h_existing.id]))
+            ).scalars().all()
+            assert len(exp_rows) == 2
+            exp_map = {r.product_name: r for r in exp_rows}
+            assert exp_map[ip_new].defectdojo_product_id == 101
+            assert exp_map[ip_existing].defectdojo_product_id == 42
+    finally:
+        _cleanup()
+
 
 

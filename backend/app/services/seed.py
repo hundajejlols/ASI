@@ -199,8 +199,38 @@ def ensure_default_group_and_profile(db: Session) -> tuple[TargetGroup, ScanProf
 
 def seed_default_signatures(db: Session) -> int:
     # 1. Idempotentna migracja schematu dla istniejących wolumenów PostgreSQL
-    db.execute(text("ALTER TABLE integrations ADD COLUMN IF NOT EXISTS product_name VARCHAR(255)"))
+    db.execute(
+        text(
+            "ALTER TABLE integrations ADD COLUMN IF NOT EXISTS product_type_name VARCHAR(255) NOT NULL DEFAULT 'AGH Attack Surface'"
+        )
+    )
+    db.execute(
+        text(
+            "ALTER TABLE integrations ADD COLUMN IF NOT EXISTS engagement_name VARCHAR(255) NOT NULL DEFAULT 'Janus ASI — Attack Surface'"
+        )
+    )
     db.execute(text("ALTER TABLE integrations ADD COLUMN IF NOT EXISTS verify_tls BOOLEAN NOT NULL DEFAULT TRUE"))
+    db.execute(
+        text(
+            """
+            DO $$
+            BEGIN
+                IF EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'integrations' AND column_name = 'product_name'
+                ) THEN
+                    UPDATE integrations
+                    SET product_type_name = COALESCE(NULLIF(BTRIM(product_name), ''), product_type_name);
+                    ALTER TABLE integrations DROP COLUMN IF EXISTS product_name;
+                END IF;
+            END $$;
+            """
+        )
+    )
+    db.execute(text("ALTER TABLE integrations DROP COLUMN IF EXISTS default_product_id"))
+    db.execute(text("ALTER TABLE integrations DROP COLUMN IF EXISTS default_engagement_id"))
+    db.execute(text("ALTER TABLE defectdojo_exports ADD COLUMN IF NOT EXISTS product_name VARCHAR(255)"))
+    db.execute(text("ALTER TABLE defectdojo_exports ADD COLUMN IF NOT EXISTS defectdojo_product_id INTEGER"))
     db.execute(
         text(
             "ALTER TABLE http_fingerprints ADD COLUMN IF NOT EXISTS tech_confidence JSONB NOT NULL DEFAULT '{}'::jsonb"

@@ -181,7 +181,7 @@ for ev in json.load(sys.stdin):
     print(f'  - [{ev[\"change_type\"]}] host={ev[\"host_ip\"]} prev={ev[\"previous_value\"]} -> curr={ev[\"current_value\"]}')
 "
 
-  echo -e "\n${BOLD}Podgląd eksportu DefectDojo API v2 (dry_run=true, only_interesting=true):${RESET}"
+  echo -e "\n${BOLD}Podgląd eksportu DefectDojo API v2 (1 IP = 1 Asset, dry_run=true, only_interesting=true):${RESET}"
   curl -s -X POST "${API_URL}/integrations/defectdojo/export" \
     -H "Content-Type: application/json" \
     -H "X-Dev-Role: modify_read" \
@@ -189,8 +189,10 @@ for ev in json.load(sys.stdin):
 import sys, json
 res = json.load(sys.stdin)
 print('  Statystyki:', res.get('stats'))
-for f in (res.get('payload') or {}).get('findings', []):
-    print(f'  * [{f[\"severity\"]}] {f[\"title\"]} -> tags={f[\"tags\"]}')
+for asset in res.get('assets', []):
+    print(f'  [Asset: {asset[\"product_name\"]} | Org: {asset[\"product_type_name\"]} ({asset[\"product_type_source\"]}) | findings={asset[\"findings_count\"]}]')
+    for f in (asset.get('payload') or {}).get('findings', []):
+        print(f'    * [{f[\"severity\"]}] {f[\"title\"]} -> tags={f[\"tags\"]}')
 "
 }
 

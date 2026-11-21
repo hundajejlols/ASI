@@ -317,9 +317,8 @@ CREATE TABLE integrations (
     provider                VARCHAR(32) NOT NULL DEFAULT 'defectdojo',
     base_url                TEXT NOT NULL,
     api_token_encrypted     BYTEA NOT NULL,              -- AES-256-GCM: [ver(1B)|nonce(12B)|ct+tag]
-    product_name            VARCHAR(255),
-    default_product_id      INT,
-    default_engagement_id   INT,
+    product_type_name       VARCHAR(255) NOT NULL DEFAULT 'AGH Attack Surface',
+    engagement_name         VARCHAR(255) NOT NULL DEFAULT 'Janus ASI — Attack Surface',
     verify_tls              BOOLEAN NOT NULL DEFAULT TRUE,
     is_active               BOOLEAN NOT NULL DEFAULT TRUE,
     updated_by              UUID REFERENCES users(id) ON DELETE SET NULL,
@@ -332,6 +331,8 @@ CREATE TABLE defectdojo_exports (
     change_event_id         UUID REFERENCES change_events(id) ON DELETE SET NULL,
     host_id                 UUID REFERENCES hosts(id) ON DELETE SET NULL,
     service_id              UUID REFERENCES services(id) ON DELETE SET NULL,
+    product_name            VARCHAR(255),                -- nazwa Assetu (Product) w DefectDojo = adres IP
+    defectdojo_product_id   INT,
     defectdojo_finding_id   INT,
     status                  VARCHAR(32) NOT NULL DEFAULT 'exported',
     error_message           TEXT,

@@ -165,6 +165,8 @@ export interface DashboardSummary {
     high_or_med: number;
     new: number;
     offline: number;
+    tls_changed?: number;
+    tech_changed?: number;
   }[];
   changes_by_type: Record<string, number>;
   time_of_day_analysis: {
@@ -216,6 +218,29 @@ export interface HostDetail {
   last_scan_run_id: string | null;
   override: OverrideOut | null;
   services: ServiceOut[];
+}
+
+export interface TimelineDayDetails {
+  date: string;
+  total: number;
+  hourly: Array<{
+    hour: number;
+    total: number;
+    high_or_med: number;
+    new: number;
+    offline: number;
+  }>;
+  by_type: Array<{ change_type: string; count: number }>;
+  by_severity: Record<string, number>;
+  sample_events: Array<{
+    id: string;
+    host_ip: string | null;
+    service_port: number | null;
+    service_protocol: string | null;
+    change_type: string;
+    severity: Severity;
+    detected_at: string;
+  }>;
 }
 
 export interface ChangeEvent {
@@ -274,10 +299,75 @@ export interface SignatureItem {
 export interface DefectDojoConfig {
   configured: boolean;
   base_url: string | null;
-  engagement_id: number | null;
-  product_name: string | null;
+  product_type_name: string;
+  engagement_name: string;
   verify_tls: boolean;
   is_active: boolean;
   has_api_token: boolean;
   updated_at: string | null;
+}
+
+export interface DefectDojoDryRunAsset {
+  host_id: string;
+  ip_address: string;
+  hostname: string | null;
+  product_name: string;
+  product_type_name: string;
+  product_type_source: 'owner_unit' | 'default';
+  engagement_name: string;
+  test_title: string;
+  findings_count: number;
+  form_fields: Record<string, string>;
+  payload: { findings: Array<Record<string, unknown>> };
+}
+
+export interface DefectDojoExportHostResult {
+  host_id: string;
+  ip_address: string;
+  hostname?: string | null;
+  product_name: string;
+  product_type_name: string | null;
+  product_type_source: 'owner_unit' | 'default' | 'existing_in_defectdojo';
+  engagement_name?: string;
+  action?: 'created' | 'updated';
+  status: 'exported' | 'failed';
+  status_code?: number;
+  product_id?: number | null;
+  product_type_id?: number | null;
+  engagement_id?: number | null;
+  test_id?: number | null;
+  findings_count: number;
+  error?: string;
+}
+
+export interface DefectDojoExportResponse {
+  dry_run: boolean;
+  configured?: boolean;
+  exported?: boolean;
+  partial_failure?: boolean;
+  mode: string;
+  strategy?: string;
+  target_reimport_url?: string;
+  default_product_type_name: string;
+  engagement_name: string;
+  test_title: string;
+  close_old_findings: boolean;
+  stats: {
+    hosts_evaluated: number;
+    assets_to_export: number;
+    hosts_exported: number;
+    skipped_ignored_or_fp: number;
+    skipped_offline: number;
+    skipped_no_findings: number;
+    total_findings: number;
+    only_interesting: boolean;
+    assets_exported?: number;
+    assets_created?: number;
+    assets_updated?: number;
+    assets_failed?: number;
+  };
+  assets_preview_truncated?: boolean;
+  assets_preview_limit?: number;
+  assets?: DefectDojoDryRunAsset[];
+  results?: DefectDojoExportHostResult[];
 }
