@@ -162,7 +162,7 @@ export default function App() {
         <div className="max-w-7xl mx-auto px-4 sm:px-6 h-12 flex items-center justify-between gap-3">
           <div className="flex items-center gap-3 overflow-x-auto">
             <span className="px-2 py-0.5 rounded bg-primary text-primary-foreground font-mono font-bold text-xs tracking-tight shrink-0">
-              ASI
+              Janus ASI
             </span>
             <TabsList className="h-8 bg-transparent border-0 p-0 gap-0.5">
               {TABS.map((tab) => (

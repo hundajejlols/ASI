@@ -4,7 +4,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
-    app_name: str = "Attack Surface Intelligence (AGH)"
+    app_name: str = "Janus ASI — Attack Surface Intelligence (CBI AGH)"
     api_v1_prefix: str = "/api/v1"
 
     database_url: str = "postgresql+psycopg://asi_user:changeme_strong_db_password@postgres:5432/asi_db"

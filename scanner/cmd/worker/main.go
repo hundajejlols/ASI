@@ -85,21 +85,21 @@ func recoverOrphanedProcessingJobs(ctx context.Context, rdb *redis.Client, jobQu
 		_, err := rdb.LMove(ctx, procQueue, jobQueue, "RIGHT", "LEFT").Result()
 		if err != nil {
 			if !errors.Is(err, redis.Nil) {
-				log.Printf("[asi-scanner] processing recovery warning: %v", err)
+				log.Printf("[janus-asi-scanner] processing recovery warning: %v", err)
 			}
 			break
 		}
 		recovered++
 	}
 	if recovered > 0 {
-		log.Printf("[asi-scanner] recovered %d orphaned job(s) from %s -> %s", recovered, procQueue, jobQueue)
+		log.Printf("[janus-asi-scanner] recovered %d orphaned job(s) from %s -> %s", recovered, procQueue, jobQueue)
 	}
 }
 
 func main() {
 	cfg := config.Load()
 	processingQueue := cfg.RedisJobQueue + ":processing:" + cfg.WorkerID
-	log.Printf("[asi-scanner] start worker=%s chunk_workers=%d http_concurrency=%d http_max_rps=%d queue=%s",
+	log.Printf("[janus-asi-scanner] start worker=%s chunk_workers=%d http_concurrency=%d http_max_rps=%d queue=%s",
 		cfg.WorkerID, cfg.ChunkWorkers, cfg.Concurrency, cfg.HTTPMaxRPS, cfg.RedisJobQueue)
 
 	opt, err := redis.ParseURL(cfg.RedisURL)
@@ -137,14 +137,14 @@ func main() {
 					if errors.Is(err, redis.Nil) || errors.Is(err, context.Canceled) {
 						continue
 					}
-					log.Printf("[asi-scanner] slot=%d redis pop error: %v", slotID, err)
+					log.Printf("[janus-asi-scanner] slot=%d redis pop error: %v", slotID, err)
 					time.Sleep(2 * time.Second)
 					continue
 				}
 
 				var job contract.ScanJobChunk
 				if err := json.Unmarshal([]byte(rawPayload), &job); err != nil {
-					log.Printf("[asi-scanner] slot=%d invalid job json: %v", slotID, err)
+					log.Printf("[janus-asi-scanner] slot=%d invalid job json: %v", slotID, err)
 					_ = rdb.LRem(context.Background(), processingQueue, 1, rawPayload).Err()
 					continue
 				}
@@ -156,7 +156,7 @@ func main() {
 	}
 
 	wg.Wait()
-	log.Println("[asi-scanner] graceful shutdown")
+	log.Println("[janus-asi-scanner] graceful shutdown")
 }
 
 func processJob(
@@ -166,7 +166,7 @@ func processJob(
 	rateWait func(context.Context) error,
 ) {
 	startedAt := time.Now().UTC()
-	log.Printf("[asi-scanner] picked chunk=%s target=%s deadline=%s sigs=%d",
+	log.Printf("[janus-asi-scanner] picked chunk=%s target=%s deadline=%s sigs=%d",
 		job.ChunkID, job.TargetCIDR, job.WindowDeadlineUTC.Format(time.RFC3339), len(job.Signatures))
 
 	result := contract.ScanChunkResult{
@@ -180,7 +180,7 @@ func processJob(
 
 	// 1. Twarda kontrola okna czasowego przed startem nmap
 	if time.Now().UTC().After(job.WindowDeadlineUTC) {
-		log.Printf("[asi-scanner] window already expired before nmap for chunk=%s", job.ChunkID)
+		log.Printf("[janus-asi-scanner] window already expired before nmap for chunk=%s", job.ChunkID)
 		result.Status = "requeued_window"
 		result.FinishedAt = time.Now().UTC()
 		postResult(cfg, result)
@@ -197,7 +197,7 @@ func processJob(
 	hosts, err := nmap.Run(ctx, job.TargetCIDR, job.Profile)
 	if err != nil {
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) || parentCtx.Err() != nil {
-			log.Printf("[asi-scanner] window deadline or shutdown hit during nmap for chunk=%s -> requeued_window", job.ChunkID)
+			log.Printf("[janus-asi-scanner] window deadline or shutdown hit during nmap for chunk=%s -> requeued_window", job.ChunkID)
 			result.Status = "requeued_window"
 		} else {
 			errMsg := err.Error()
@@ -312,7 +312,7 @@ func processJob(
 }
 
 func handleWindowAbort(cfg config.Config, result *contract.ScanChunkResult, chunkID string) {
-	log.Printf("[asi-scanner] window deadline/shutdown hit during HTTP/signatures for chunk=%s -> requeued_window", chunkID)
+	log.Printf("[janus-asi-scanner] window deadline/shutdown hit during HTTP/signatures for chunk=%s -> requeued_window", chunkID)
 	result.Status = "requeued_window"
 	result.Hosts = []contract.HostResult{}
 	result.FinishedAt = time.Now().UTC()
@@ -425,13 +425,13 @@ func isWebPort(port int, serviceName *string, product *string, banner *string) b
 func postResult(cfg config.Config, result contract.ScanChunkResult) {
 	body, err := json.Marshal(result)
 	if err != nil {
-		log.Printf("[asi-scanner] marshal result error: %v", err)
+		log.Printf("[janus-asi-scanner] marshal result error: %v", err)
 		return
 	}
 	for attempt := 1; attempt <= 3; attempt++ {
 		req, err := http.NewRequest(http.MethodPost, cfg.BackendIngestURL, bytes.NewReader(body))
 		if err != nil {
-			log.Printf("[asi-scanner] request error: %v", err)
+			log.Printf("[janus-asi-scanner] request error: %v", err)
 			return
 		}
 		req.Header.Set("Content-Type", "application/json")
@@ -439,17 +439,17 @@ func postResult(cfg config.Config, result contract.ScanChunkResult) {
 
 		resp, err := ingestHTTPClient.Do(req)
 		if err != nil {
-			log.Printf("[asi-scanner] ingest post error (attempt %d/3): %v", attempt, err)
+			log.Printf("[janus-asi-scanner] ingest post error (attempt %d/3): %v", attempt, err)
 			time.Sleep(time.Duration(attempt) * time.Second)
 			continue
 		}
 		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		resp.Body.Close()
 		if resp.StatusCode >= 400 {
-			log.Printf("[asi-scanner] ingest failed chunk=%s status=%s http_code=%d body=%s",
+			log.Printf("[janus-asi-scanner] ingest failed chunk=%s status=%s http_code=%d body=%s",
 				result.ChunkID, result.Status, resp.StatusCode, strings.TrimSpace(string(respBody)))
 		} else {
-			log.Printf("[asi-scanner] sent chunk=%s status=%s hosts=%d http_code=%d",
+			log.Printf("[janus-asi-scanner] sent chunk=%s status=%s hosts=%d http_code=%d",
 				result.ChunkID, result.Status, len(result.Hosts), resp.StatusCode)
 		}
 		if resp.StatusCode < 500 {

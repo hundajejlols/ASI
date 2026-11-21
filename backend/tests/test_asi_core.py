@@ -1,5 +1,5 @@
 """
-Zestaw testów automatycznych (pytest) dla Attack Surface Intelligence (CBI AGH):
+Zestaw testów automatycznych (pytest) dla Janus ASI (Attack Surface Intelligence — CBI AGH):
   - szyfrowanie AES-256-GCM + AAD + blokada zerowego klucza,
   - JWT HS256, haszowanie scrypt, RBAC (4 role + tworzenie ról własnych) i 401 bez auth,
   - chunker CIDR (/16 -> 256x/24), scalanie nakładających się sieci, blokada SSRF i flag-injection nmap,

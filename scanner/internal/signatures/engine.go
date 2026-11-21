@@ -289,7 +289,7 @@ func safeGet(
 	if sniHost != "" {
 		req.Host = sniHost
 	}
-	req.Header.Set("User-Agent", "AGH-ASI-Scanner/0.3 (Passive Audit)")
+	req.Header.Set("User-Agent", "Janus-ASI-Scanner/0.3 (Passive Audit)")
 
 	resp, err := client.Do(req)
 	if err != nil {

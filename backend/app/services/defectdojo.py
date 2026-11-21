@@ -38,7 +38,7 @@ from app.db.models import (
 from app.services.queries import fetch_latest_http_fingerprints
 
 DEFECTDOJO_INTEGRATION_NAME = "defectdojo-default"
-ASI_TEST_TITLE = "AGH Attack Surface Intelligence"
+ASI_TEST_TITLE = "Janus ASI — Attack Surface Intelligence"
 ASI_SCAN_TYPE = "Generic Findings Import"
 
 _URI_SCHEME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*$")
@@ -211,7 +211,7 @@ def _decrypt_override_info(ov: AssetOverride | None) -> dict[str, Any] | None:
 
 def _format_override_block(host_ov: dict[str, Any] | None, svc_ov: dict[str, Any] | None) -> tuple[str, list[str]]:
     lines: list[str] = []
-    tags: list[str] = ["agh-asi"]
+    tags: list[str] = ["janus-asi"]
     for label, ov in (("Host", host_ov), ("Usługa", svc_ov)):
         if not ov:
             continue
@@ -392,15 +392,15 @@ def build_generic_findings_report(
 
                 findings.append(
                     {
-                        "title": f"[ASI Signature] {sig.name} on {ip_str}:{svc.port}",
+                        "title": f"[Janus ASI Signature] {sig.name} on {ip_str}:{svc.port}",
                         "description": "\n".join(desc_parts) + override_block,
                         "severity": sev,
                         "active": True,
                         "verified": False,
                         "endpoints": [endpoint],
                         "tags": tags,
-                        "unique_id_from_tool": f"asi-sig-{h.id}-{svc.id}-{sig_id}",
-                        "vuln_id_from_tool": f"ASI-SIG-{sig.match_type.upper()}",
+                        "unique_id_from_tool": f"janus-asi-sig-{h.id}-{svc.id}-{sig_id}",
+                        "vuln_id_from_tool": f"JANUS-ASI-SIG-{sig.match_type.upper()}",
                         "date": today_str,
                     }
                 )
@@ -425,7 +425,7 @@ def build_generic_findings_report(
                     flags.append("Exposed Infrastructure")
                 elif is_exposed_db_or_broker:
                     flags.append("Exposed DB/Broker")
-                prefix = f"[ASI {' / '.join(flags)}]" if flags else "[ASI Exposed Service]"
+                prefix = f"[Janus ASI {' / '.join(flags)}]" if flags else "[Janus ASI Exposed Service]"
 
                 desc_parts = [
                     f"**Host:** {host_label} (status: `{h.status}`)",
@@ -467,8 +467,8 @@ def build_generic_findings_report(
                         "verified": False,
                         "endpoints": [endpoint],
                         "tags": tags,
-                        "unique_id_from_tool": f"asi-svc-{h.id}-{svc.id}",
-                        "vuln_id_from_tool": "ASI-EXPOSED-SERVICE",
+                        "unique_id_from_tool": f"janus-asi-svc-{h.id}-{svc.id}",
+                        "vuln_id_from_tool": "JANUS-ASI-EXPOSED-SERVICE",
                         "date": today_str,
                     }
                 )
@@ -493,7 +493,7 @@ def _find_existing_asi_test_id(
 ) -> int | None:
     """
     Sprawdza w DefectDojo, czy w danym engagement_id istnieje już test
-    o tytule 'AGH Attack Surface Intelligence' i typie 'Generic Findings Import'.
+    o tytule 'Janus ASI — Attack Surface Intelligence' i typie 'Generic Findings Import'.
     Zwraca test_id lub None.
     """
     resp = client.get(

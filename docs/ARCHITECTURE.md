@@ -1,6 +1,6 @@
-# Architektura Systemu: Attack Surface Intelligence (CBI AGH)
+# Architektura Systemu: Janus ASI (Attack Surface Intelligence — CBI AGH)
 
-Dokument opisuje architekturę techniczną prototypu **Attack Surface Intelligence (ASI)** — inteligentnego orkiestratora skanowania powierzchni ataku i pomostu integracyjnego do **DefectDojo (API v2)**.
+Dokument opisuje architekturę techniczną prototypu **Janus ASI (Attack Surface Intelligence)** — inteligentnego orkiestratora skanowania powierzchni ataku i pomostu integracyjnego do **DefectDojo (API v2)**.
 
 ---
 
@@ -97,4 +97,4 @@ Wszystkie ręczne korekty analityków (`custom_label`, `owner_unit`, `criticalit
 Serwis [defectdojo.py](../backend/app/services/defectdojo.py) (`POST /api/v1/integrations/defectdojo/export`):
 1. **Filtruje szum:** automatycznie odrzuca hosty i usługi posiadające w `asset_overrides` flagę `is_ignored = true` lub `is_false_positive = true`.
 2. **Wzbogaca kontekst:** do opisu (`description`) i listy `tags` każdego znaleziska dołącza odszyfrowaną notatkę analityka, przypisaną jednostkę organizacyjną AGH oraz własną etykietę.
-3. **Generuje standardowy format:** tworzy dokument zgodny ze specyfikacją **Generic Findings Import (JSON)** ze stabilnym kluczem deduplikacji `unique_id_from_tool`, sprawdza w `GET /api/v2/tests/` czy istnieje już test `AGH Attack Surface Intelligence` w danym Engagement i przesyła raport do `POST /api/v2/import-scan/` (pierwszy eksport) lub `POST /api/v2/reimport-scan/` (kolejne eksporty z deduplikacją) — albo zwraca podgląd w trybie `dry_run: true`.
+3. **Generuje standardowy format:** tworzy dokument zgodny ze specyfikacją **Generic Findings Import (JSON)** ze stabilnym kluczem deduplikacji `unique_id_from_tool`, sprawdza w `GET /api/v2/tests/` czy istnieje już test `Janus ASI — Attack Surface Intelligence` w danym Engagement i przesyła raport do `POST /api/v2/import-scan/` (pierwszy eksport) lub `POST /api/v2/reimport-scan/` (kolejne eksporty z deduplikacją) — albo zwraca podgląd w trybie `dry_run: true`.

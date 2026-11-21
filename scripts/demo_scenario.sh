@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# Attack Surface Intelligence (CBI AGH) — Scenariusz Demo na Żywo dla Jury
+# Janus ASI (Attack Surface Intelligence — CBI AGH) — Scenariusz Demo na Żywo dla Jury
 #
 # Użycie:
 #   ./scripts/demo_scenario.sh          # Tryb interaktywny (pauza między krokami)

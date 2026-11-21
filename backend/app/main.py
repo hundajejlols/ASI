@@ -51,7 +51,7 @@ async def lifespan(_app: FastAPI):
 app = FastAPI(
     title=settings.app_name,
     version="0.2.0",
-    description="Middleware/Orkiestrator Attack Surface Intelligence (CBI AGH) <-> DefectDojo",
+    description="Janus ASI — Middleware/Orkiestrator Attack Surface Intelligence (CBI AGH) <-> DefectDojo",
     lifespan=lifespan,
 )
 

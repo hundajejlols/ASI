@@ -1,5 +1,5 @@
 """
-Rejestr zdarzeń audytowych (audit_logs) dla operacji administracyjnych i modyfikacji w ASI.
+Rejestr zdarzeń audytowych (audit_logs) dla operacji administracyjnych i modyfikacji w Janus ASI.
 """
 
 from typing import Any

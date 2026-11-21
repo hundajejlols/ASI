@@ -1,6 +1,6 @@
-# Attack Surface Intelligence (CBI AGH)
+# Janus ASI — Attack Surface Intelligence (CBI AGH)
 
-Prototyp inteligentnego pomostu (**middleware / orkiestratora**) pomiędzy narzędziami skanującymi (`nmap`, HTTP/HTTPS fingerprinting, pasywny silnik sygnatur) a platformą **DefectDojo (API v2)**, przygotowany dla **Centrum Bezpieczeństwa Informacji AGH**.
+**Janus ASI** to prototyp inteligentnego pomostu (**middleware / orkiestratora**) pomiędzy narzędziami skanującymi (`nmap`, HTTP/HTTPS fingerprinting, pasywny silnik sygnatur) a platformą **DefectDojo (API v2)**, przygotowany dla **Centrum Bezpieczeństwa Informacji AGH**.
 
 Szczegółowy opis architektury, algorytmu `missed_scans`, szyfrowania `AES-256-GCM` oraz izolacji `asset_overrides` znajduje się w dokumencie **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)**.
 
@@ -90,7 +90,7 @@ Kontener `backend` posiada skonfigurowane mapowanie `host.docker.internal:host-g
    - Zaloguj się do DefectDojo → kliknij menu użytkownika w prawym górnym rogu → wybierz **API v2 Key** i skopiuj wygenerowany token.
 2. **Pobranie `Engagement ID`:**
    - W DefectDojo otwórz docelowy *Product* → zakładka *Engagements* → wejdź w wybrany Engagement. Numer ID znajduje się w adresie URL: `/engagement/<ID>` (np. `1`).
-3. **Konfiguracja i test w ASI UI (`http://localhost:3000` → zakładka *DefectDojo*):**
+3. **Konfiguracja i test w Janus ASI UI (`http://localhost:3000` → zakładka *DefectDojo*):**
    - Przełącz rolę RBAC w górnym pasku na `admin`.
    - Wpisz **Base URL**:
      - `http://host.docker.internal:8080` (dla DefectDojo działającego lokalnie na porcie `8080` hosta), lub

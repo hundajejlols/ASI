@@ -1,5 +1,5 @@
 -- =============================================================================
--- Attack Surface Intelligence (AGH) - PostgreSQL Schema
+-- Janus ASI (Attack Surface Intelligence — CBI AGH) - PostgreSQL Schema
 -- Obsługuje: RBAC (4 role), harmonogramy i okna czasowe, paczki CIDR,
 -- niestabilne hosty (missed_scans), Diff, sygnatury pasywne,
 -- niezależne nadpisania ręczne (asset_overrides) oraz Encryption At Rest (BYTEA).
