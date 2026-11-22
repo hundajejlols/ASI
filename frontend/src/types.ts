@@ -610,3 +610,60 @@ export interface DefectDojoExportResponse {
   assets?: DefectDojoDryRunAsset[];
   results?: DefectDojoExportHostResult[];
 }
+
+export type AiUrgency = 'critical' | 'high' | 'medium' | 'low' | 'safe';
+
+export interface AiAgentConfig {
+  configured: boolean;
+  provider: string;
+  base_url: string;
+  model_name: string;
+  has_api_key: boolean;
+  auto_analyze_after_scan: boolean;
+  is_active: boolean;
+  updated_at: string | null;
+  popular_models: Array<{ id: string; label: string }>;
+}
+
+export interface AiAffectedSoftware {
+  name: string;
+  version: string | null;
+  port: number | null;
+  status: string;
+  cves: string[];
+  reason: string;
+}
+
+export interface AiAlertItem {
+  id: string;
+  host_id: string;
+  ip_address: string | null;
+  hostname: string | null;
+  host_status: string | null;
+  owner_unit: string | null;
+  custom_label: string | null;
+  scan_run_id: string | null;
+  urgency: AiUrgency;
+  requires_admin_alert: boolean;
+  title: string;
+  affected_software: AiAffectedSoftware[];
+  cves: string[];
+  summary: string;
+  admin_alert_message: string | null;
+  remediation: string | null;
+  analysis_source: string;
+  acknowledged: boolean;
+  acknowledged_at: string | null;
+  acknowledged_by: string | null;
+  created_at: string | null;
+}
+
+export interface AiAlertsResponse {
+  summary: {
+    total: number;
+    urgent_unacknowledged: number;
+    vulnerable_or_outdated: number;
+    safe_or_low: number;
+  };
+  alerts: AiAlertItem[];
+}

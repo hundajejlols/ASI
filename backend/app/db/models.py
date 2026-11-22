@@ -381,3 +381,39 @@ class DefectDojoExport(Base):
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="exported")
     error_message: Mapped[str | None] = mapped_column(Text)
     exported_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class AiAgentConfig(Base):
+    __tablename__ = "ai_agent_configs"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default="default")
+    provider: Mapped[str] = mapped_column(String(32), nullable=False, default="openrouter")
+    base_url: Mapped[str] = mapped_column(Text, nullable=False, default="https://openrouter.ai/api/v1")
+    model_name: Mapped[str] = mapped_column(String(128), nullable=False, default="google/gemini-2.5-flash")
+    api_key_encrypted: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    auto_analyze_after_scan: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+class AiAlert(Base):
+    __tablename__ = "ai_alerts"
+
+    id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
+    host_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), ForeignKey("hosts.id", ondelete="CASCADE"), nullable=False)
+    scan_run_id: Mapped[UUID | None] = mapped_column(PGUUID(as_uuid=True), ForeignKey("scan_runs.id", ondelete="SET NULL"))
+    urgency: Mapped[str] = mapped_column(String(16), nullable=False, default="safe")
+    requires_admin_alert: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    affected_software: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    cves: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    summary: Mapped[str] = mapped_column(Text, nullable=False)
+    admin_alert_message: Mapped[str | None] = mapped_column(Text)
+    remediation: Mapped[str | None] = mapped_column(Text)
+    analysis_source: Mapped[str] = mapped_column(String(128), nullable=False, default="openrouter")
+    acknowledged: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    acknowledged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    acknowledged_by: Mapped[str | None] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    host: Mapped[Host] = relationship("Host")

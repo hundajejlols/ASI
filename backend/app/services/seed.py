@@ -283,6 +283,52 @@ def seed_default_signatures(db: Session) -> int:
     db.execute(
         text("ALTER TABLE scan_runs ADD COLUMN IF NOT EXISTS scanned_ports TEXT")
     )
+    db.execute(
+        text(
+            """
+            CREATE TABLE IF NOT EXISTS ai_agent_configs (
+                id                      VARCHAR(32) PRIMARY KEY DEFAULT 'default',
+                provider                VARCHAR(32) NOT NULL DEFAULT 'openrouter',
+                base_url                TEXT NOT NULL DEFAULT 'https://openrouter.ai/api/v1',
+                model_name              VARCHAR(128) NOT NULL DEFAULT 'google/gemini-2.5-flash',
+                api_key_encrypted       BYTEA NOT NULL,
+                auto_analyze_after_scan BOOLEAN NOT NULL DEFAULT TRUE,
+                is_active               BOOLEAN NOT NULL DEFAULT TRUE,
+                updated_at              TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+            """
+        )
+    )
+    db.execute(
+        text(
+            """
+            CREATE TABLE IF NOT EXISTS ai_alerts (
+                id                      UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                host_id                 UUID NOT NULL REFERENCES hosts(id) ON DELETE CASCADE,
+                scan_run_id             UUID REFERENCES scan_runs(id) ON DELETE SET NULL,
+                urgency                 VARCHAR(16) NOT NULL DEFAULT 'safe',
+                requires_admin_alert    BOOLEAN NOT NULL DEFAULT FALSE,
+                title                   VARCHAR(255) NOT NULL,
+                affected_software       JSONB NOT NULL DEFAULT '[]'::jsonb,
+                cves                    JSONB NOT NULL DEFAULT '[]'::jsonb,
+                summary                 TEXT NOT NULL,
+                admin_alert_message     TEXT,
+                remediation             TEXT,
+                analysis_source         VARCHAR(128) NOT NULL DEFAULT 'openrouter',
+                acknowledged            BOOLEAN NOT NULL DEFAULT FALSE,
+                acknowledged_at         TIMESTAMPTZ,
+                acknowledged_by         VARCHAR(64),
+                created_at              TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+            """
+        )
+    )
+    db.execute(
+        text("CREATE INDEX IF NOT EXISTS idx_ai_alerts_host_created ON ai_alerts (host_id, created_at DESC)")
+    )
+    db.execute(
+        text("CREATE INDEX IF NOT EXISTS idx_ai_alerts_urgency ON ai_alerts (requires_admin_alert, acknowledged, created_at DESC)")
+    )
     db.commit()
 
     # 2. Domyślna grupa i profile skanowania (chroni przed pustą bazą)

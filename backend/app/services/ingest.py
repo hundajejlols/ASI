@@ -341,6 +341,7 @@ def ingest_scan_result(
 
     changes_recorded = 0
     seen_up_ips: set[str] = set()
+    processed_host_ids: list[UUID] = []
     if is_partial is not None:
         is_partial_ingest = is_partial
     else:
@@ -392,6 +393,7 @@ def ingest_scan_result(
             )
             db.add(host)
             db.flush()
+            processed_host_ids.append(host.id)
             record_change(
                 host_id=host.id,
                 change_type="host_new",
@@ -399,6 +401,9 @@ def ingest_scan_result(
                 current_value={"ip": host_ip_str, "hostname": host_in.hostname},
             )
         else:
+            if host.id not in processed_host_ids:
+                processed_host_ids.append(host.id)
+
             prev_status = host.status
             prev_missed = host.missed_scans
             host.status = "online"
@@ -785,6 +790,15 @@ def ingest_scan_result(
                 h.status = "unstable"
 
     db.commit()
+
+    if processed_host_ids:
+        from app.services.ai_agent import schedule_post_scan_ai_analysis
+
+        schedule_post_scan_ai_analysis(
+            host_ids=processed_host_ids,
+            scan_run_id=scan_run.id,
+            worker_id=payload.worker_id,
+        )
 
     return {
         "accepted": True,

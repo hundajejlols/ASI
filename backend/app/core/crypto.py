@@ -30,6 +30,7 @@ AAD_HTTP_HEADERS = b"http_fingerprints.headers_encrypted"
 AAD_HTTP_COOKIES = b"http_fingerprints.cookies_encrypted"
 AAD_OVERRIDE_NOTES = b"asset_overrides.notes_encrypted"
 AAD_INTEGRATION_TOKEN = b"integrations.api_token_encrypted"
+AAD_AI_AGENT_KEY = b"ai_agent_configs.api_key_encrypted"
 
 
 def _get_aesgcm() -> AESGCM:

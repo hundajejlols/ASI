@@ -1,11 +1,26 @@
-import { AlertCircle, KeyRound, Lock, LogOut, Moon, RefreshCw, Sun } from 'lucide-react';
+import {
+  AlertCircle,
+  Bug,
+  Fingerprint,
+  KeyRound,
+  Lock,
+  LogOut,
+  Moon,
+  RefreshCw,
+  Sparkles,
+  Sun,
+  UserCog,
+} from 'lucide-react';
 import { useCallback, useEffect, useState } from 'react';
 import { API_BASE, apiFetch, setAuthToken, syncDynamicRoles } from './api';
+import { AiAgentTab } from './components/AiAgentTab';
 import { ChangesTab } from './components/ChangesTab';
 import { DashboardTab } from './components/DashboardTab';
 import { DefectDojoTab } from './components/DefectDojoTab';
 import { GroupsTab } from './components/GroupsTab';
+import { HostDetailSheet } from './components/HostDetailSheet';
 import { HostsTab } from './components/HostsTab';
+import { NotificationBell } from './components/NotificationBell';
 import { RbacAuditTab } from './components/RbacAuditTab';
 import { SignaturesTab } from './components/SignaturesTab';
 import { TargetsScansTab } from './components/TargetsScansTab';
@@ -27,18 +42,35 @@ import type {
   UserRole,
 } from './types';
 
-type TabKey = 'dashboard' | 'hosts' | 'groups' | 'changes' | 'targets' | 'signatures' | 'defectdojo' | 'rbac';
+type TabKey =
+  | 'dashboard'
+  | 'hosts'
+  | 'groups'
+  | 'changes'
+  | 'targets'
+  | 'signatures'
+  | 'ai_agent'
+  | 'defectdojo'
+  | 'rbac';
 type ThemeMode = 'dark' | 'light';
 
-const TABS: { key: TabKey; label: string }[] = [
-  { key: 'dashboard', label: 'Dashboard' },
-  { key: 'hosts', label: 'Hosts' },
-  { key: 'groups', label: 'Groups' },
-  { key: 'changes', label: 'Diff' },
-  { key: 'targets', label: 'Targets & Scans' },
-  { key: 'signatures', label: 'Signatures' },
-  { key: 'defectdojo', label: 'DefectDojo' },
-  { key: 'rbac', label: 'RBAC & Audit' },
+const PRIMARY_TABS: { key: TabKey; label: string; title: string }[] = [
+  { key: 'dashboard', label: 'Dashboard', title: 'Przegląd i statystyki powierzchni ataku' },
+  { key: 'hosts', label: 'Hosts', title: 'Odkryte hosty i usługi' },
+  { key: 'groups', label: 'Groups', title: 'Automatyczne grupy i Smart Groups' },
+  { key: 'changes', label: 'Diff', title: 'Historia zmian (Diff)' },
+  { key: 'targets', label: 'Scans', title: 'Cele, skanowanie i harmonogramy' },
+];
+
+const ICON_TABS: {
+  key: TabKey;
+  label: string;
+  title: string;
+  Icon: typeof Fingerprint;
+}[] = [
+  { key: 'signatures', label: 'Signatures', title: 'Sygnatury pasywne (kreator, import/eksport JSON)', Icon: Fingerprint },
+  { key: 'defectdojo', label: 'DefectDojo', title: 'Integracja DefectDojo (1 IP = 1 Asset)', Icon: Bug },
+  { key: 'rbac', label: 'RBAC', title: 'Role RBAC, Konta, Zakres widoczności i Audyt', Icon: UserCog },
 ];
 
 const DEFAULT_ROLES: UserRole[] = ['admin', 'add_delete_modify', 'modify_read', 'read_only'];
@@ -65,6 +97,8 @@ export default function App() {
   const [signatureDraft, setSignatureDraft] = useState<SignatureDraft | null>(null);
   const [groupSearchQuery, setGroupSearchQuery] = useState<string | null>(null);
   const [ddPreselect, setDdPreselect] = useState<{ hostIds: string[]; label: string } | null>(null);
+  const [bellHostId, setBellHostId] = useState<string | null>(null);
+  const [alertsVersion, setAlertsVersion] = useState(0);
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [hosts, setHosts] = useState<HostSummary[]>([]);
   const [changes, setChanges] = useState<ChangeEvent[]>([]);
@@ -183,6 +217,14 @@ export default function App() {
     setActiveTab('defectdojo');
   }, []);
 
+  const bumpAlertsVersion = useCallback(() => {
+    setAlertsVersion((v) => v + 1);
+  }, []);
+
+  const handleCloseBellHost = useCallback(() => {
+    setBellHostId(null);
+  }, []);
+
   const handleDdPreselectConsumed = useCallback(() => {
     setDdPreselect(null);
   }, []);
@@ -193,39 +235,81 @@ export default function App() {
       onValueChange={(v) => setActiveTab(v as TabKey)}
       className="min-h-screen bg-background text-foreground transition-colors"
     >
-      {/* Kompaktowy jednoliniowy pasek górny */}
+      {/* Kompaktowy, uporządkowany pasek górny */}
       <header className="sticky top-0 z-30 border-b border-border bg-background/95 backdrop-blur">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 h-12 flex items-center justify-between gap-3">
-          <div className="flex items-center gap-3 overflow-x-auto">
-            <span className="px-2 py-0.5 rounded bg-primary text-primary-foreground font-mono font-bold text-xs tracking-tight shrink-0">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 h-12 flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2 min-w-0 overflow-x-auto">
+            <button
+              type="button"
+              onClick={() => setActiveTab('dashboard')}
+              className="px-2 py-0.5 rounded bg-primary text-primary-foreground font-mono font-bold text-xs tracking-tight shrink-0 hover:opacity-90 transition-opacity"
+              title="Przejdź do Dashboardu"
+            >
               Janus ASI
-            </span>
+            </button>
+
             <TabsList className="h-8 bg-transparent border-0 p-0 gap-0.5">
-              {TABS.map((tab) => (
+              {PRIMARY_TABS.map((tab) => (
                 <TabsTrigger
                   key={tab.key}
                   value={tab.key}
+                  title={tab.title}
                   className="h-7 px-2.5 text-xs data-[state=active]:bg-secondary data-[state=active]:border-border"
                 >
                   {tab.label}
                 </TabsTrigger>
               ))}
+
+              <span className="mx-1 h-4 w-px bg-border shrink-0" aria-hidden="true" />
+
+              {ICON_TABS.map(({ key, label, title, Icon }) => {
+                const isActive = activeTab === key;
+                return (
+                  <TabsTrigger
+                    key={key}
+                    value={key}
+                    title={title}
+                    aria-label={title}
+                    className={`h-7 text-xs gap-1.5 data-[state=active]:bg-secondary data-[state=active]:border-border ${
+                      isActive ? 'px-2.5' : 'px-2'
+                    }`}
+                  >
+                    <Icon className="h-3.5 w-3.5 shrink-0" />
+                    {isActive && <span>{label}</span>}
+                  </TabsTrigger>
+                );
+              })}
             </TabsList>
           </div>
 
-          <div className="flex items-center gap-2 shrink-0">
-            <Badge variant={apiError ? 'outline' : 'secondary'} className="font-mono hidden lg:inline-flex">
-              {apiError
-                ? 'OFFLINE'
-                : health
-                ? `${health.status.toUpperCase()} • DB:${health.services.postgres} • R:${health.services.redis}`
-                : '...'}
-            </Badge>
+          <div className="flex items-center gap-1.5 shrink-0">
+            {/* Kompaktowa kropka statusu API/DB/Redis zamiast szerokiego badge */}
+            <span
+              className="hidden sm:inline-flex items-center justify-center h-8 px-2 rounded-md border border-border bg-secondary/40 gap-1.5 font-mono text-[10px] text-muted-foreground"
+              title={
+                apiError
+                  ? 'Backend API: OFFLINE'
+                  : health
+                  ? `API: ${health.status.toUpperCase()} • PostgreSQL: ${health.services.postgres} • Redis: ${health.services.redis}`
+                  : 'Łączenie z Backend API...'
+              }
+            >
+              <span
+                className={`h-2 w-2 rounded-full ${
+                  apiError
+                    ? 'bg-red-500'
+                    : health?.status === 'ok'
+                    ? 'bg-emerald-500'
+                    : 'bg-amber-400 animate-pulse'
+                }`}
+              />
+              <span className="hidden xl:inline">{apiError ? 'OFFLINE' : 'OK'}</span>
+            </span>
 
             {session ? (
               <div className="flex items-center gap-1.5">
                 <Badge variant="default" className="font-mono text-[11px]">
-                  JWT: {session.username} ({session.role})
+                  {session.username} ({session.role})
                 </Badge>
                 {session.scope_restricted && (
                   <Badge
@@ -234,7 +318,7 @@ export default function App() {
                     title="Konto ma ograniczony zakres widoczności zasobów"
                   >
                     <Lock className="h-2.5 w-2.5" />
-                    Zakres: {session.scope_summary?.matched_hosts_count ?? 0} hostów
+                    {session.scope_summary?.matched_hosts_count ?? 0} hostów
                   </Badge>
                 )}
                 <Button variant="outline" size="icon" onClick={handleLogout} title="Wyloguj JWT (wróć do przełącznika demo)">
@@ -243,7 +327,7 @@ export default function App() {
               </div>
             ) : (
               <>
-                <div className="w-40">
+                <div className="w-32">
                   <Select
                     value={role}
                     onChange={(e) => setRole(e.target.value as UserRole)}
@@ -270,6 +354,37 @@ export default function App() {
               </>
             )}
 
+            <span className="mx-0.5 h-4 w-px bg-border shrink-0" aria-hidden="true" />
+
+            {/* Lekko świecąca ikona AI Security Agenta po prawej stronie */}
+            <button
+              type="button"
+              onClick={() => setActiveTab('ai_agent')}
+              title="AI Security Agent (OpenRouter — pasywna analiza podatności)"
+              aria-label="AI Security Agent"
+              className={`relative inline-flex h-8 items-center justify-center gap-1.5 rounded-md border transition-all duration-300 ${
+                activeTab === 'ai_agent'
+                  ? 'px-2.5 border-violet-400/80 bg-violet-500/20 text-violet-700 dark:text-violet-200 shadow-[0_0_16px_rgba(167,139,250,0.55)]'
+                  : 'w-8 border-violet-400/45 bg-violet-500/10 text-violet-600 dark:text-violet-300 shadow-[0_0_12px_rgba(167,139,250,0.38)] hover:shadow-[0_0_18px_rgba(167,139,250,0.65)] hover:border-violet-400/75'
+              }`}
+            >
+              <span
+                className="pointer-events-none absolute inset-0 rounded-md bg-violet-400/15 animate-pulse"
+                aria-hidden="true"
+              />
+              <Sparkles className="relative h-3.5 w-3.5 shrink-0 drop-shadow-[0_0_6px_rgba(167,139,250,0.85)]" />
+              {activeTab === 'ai_agent' && <span className="relative text-xs font-medium">AI</span>}
+            </button>
+
+            <NotificationBell
+              role={effectiveRole}
+              authKey={authKey}
+              refreshTrigger={alertsVersion}
+              onOpenHost={(hid) => setBellHostId(hid)}
+              onOpenAiAgent={() => setActiveTab('ai_agent')}
+              onAlertsChanged={bumpAlertsVersion}
+            />
+
             <Button
               variant="outline"
               size="icon"
@@ -280,7 +395,16 @@ export default function App() {
               {theme === 'dark' ? <Sun className="h-3.5 w-3.5" /> : <Moon className="h-3.5 w-3.5" />}
             </Button>
 
-            <Button variant="outline" size="icon" onClick={refreshCoreData} title="Odśwież" aria-label="Odśwież">
+            <Button
+              variant="outline"
+              size="icon"
+              onClick={() => {
+                refreshCoreData();
+                bumpAlertsVersion();
+              }}
+              title="Odśwież"
+              aria-label="Odśwież"
+            >
               <RefreshCw className="h-3.5 w-3.5" />
             </Button>
           </div>
@@ -366,6 +490,7 @@ export default function App() {
               summary={summary}
               onRefresh={refreshCoreData}
               onOpenGroupSearch={handleOpenGroupSearch}
+              onCreateSignature={handleCreateSignatureFromHost}
             />
           </TabsContent>
           <TabsContent value="hosts" className="mt-0">
@@ -398,6 +523,16 @@ export default function App() {
               onDraftConsumed={handleSignatureDraftConsumed}
             />
           </TabsContent>
+          <TabsContent value="ai_agent" className="mt-0">
+            <AiAgentTab
+              role={effectiveRole}
+              isCurrentUserScoped={Boolean(session?.scope_restricted)}
+              alertsVersion={alertsVersion}
+              onRefreshAll={refreshCoreData}
+              onAlertsChanged={bumpAlertsVersion}
+              onCreateSignature={handleCreateSignatureFromHost}
+            />
+          </TabsContent>
           <TabsContent value="defectdojo" className="mt-0">
             <DefectDojoTab
               role={effectiveRole}
@@ -416,6 +551,15 @@ export default function App() {
             />
           </TabsContent>
         </div>
+
+        <HostDetailSheet
+          hostId={bellHostId}
+          onClose={handleCloseBellHost}
+          role={effectiveRole}
+          onRefresh={refreshCoreData}
+          onAlertsChanged={bumpAlertsVersion}
+          onCreateSignature={handleCreateSignatureFromHost}
+        />
       </main>
     </Tabs>
   );

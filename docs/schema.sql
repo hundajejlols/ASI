@@ -346,6 +346,42 @@ CREATE TABLE defectdojo_exports (
 );
 
 -- -----------------------------------------------------------------------------
+-- 8. Pasywny AI Security Agent (OpenRouter — tylko do odczytu / alertowanie)
+-- -----------------------------------------------------------------------------
+CREATE TABLE ai_agent_configs (
+    id                      VARCHAR(32) PRIMARY KEY DEFAULT 'default',
+    provider                VARCHAR(32) NOT NULL DEFAULT 'openrouter',
+    base_url                TEXT NOT NULL DEFAULT 'https://openrouter.ai/api/v1',
+    model_name              VARCHAR(128) NOT NULL DEFAULT 'google/gemini-2.5-flash',
+    api_key_encrypted       BYTEA NOT NULL,              -- AES-256-GCM + AAD (nigdy nie zwracany w API)
+    auto_analyze_after_scan BOOLEAN NOT NULL DEFAULT TRUE,
+    is_active               BOOLEAN NOT NULL DEFAULT TRUE,
+    updated_at              TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE ai_alerts (
+    id                      UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    host_id                 UUID NOT NULL REFERENCES hosts(id) ON DELETE CASCADE,
+    scan_run_id             UUID REFERENCES scan_runs(id) ON DELETE SET NULL,
+    urgency                 VARCHAR(16) NOT NULL DEFAULT 'safe', -- critical | high | medium | low | safe
+    requires_admin_alert    BOOLEAN NOT NULL DEFAULT FALSE,
+    title                   VARCHAR(255) NOT NULL,
+    affected_software       JSONB NOT NULL DEFAULT '[]'::jsonb,
+    cves                    JSONB NOT NULL DEFAULT '[]'::jsonb,
+    summary                 TEXT NOT NULL,
+    admin_alert_message     TEXT,
+    remediation             TEXT,
+    analysis_source         VARCHAR(128) NOT NULL DEFAULT 'openrouter',
+    acknowledged            BOOLEAN NOT NULL DEFAULT FALSE,
+    acknowledged_at         TIMESTAMPTZ,
+    acknowledged_by         VARCHAR(64),
+    created_at              TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX idx_ai_alerts_host_created ON ai_alerts (host_id, created_at DESC);
+CREATE INDEX idx_ai_alerts_urgency ON ai_alerts (requires_admin_alert, acknowledged, created_at DESC);
+
+-- -----------------------------------------------------------------------------
 -- Dane startowe (Seed): domyślny profil skanowania i grupa lab_net
 -- -----------------------------------------------------------------------------
 INSERT INTO scan_profiles (name, nmap_flags, ports, rate_limit_pps, max_concurrency, chunk_cidr_prefix)

@@ -1613,3 +1613,256 @@ def test_user_scope_visibility_and_enforcement():
             )
     finally:
         _cleanup()
+
+
+def test_ai_agent_config_encrypted_read_only_and_scoped_alerts(monkeypatch):
+    """
+    Test pasywnego AI Security Agenta (OpenRouter + deterministyczny pre-check CVE/EOL):
+      - zapis klucza API OpenRouter z szyfrowaniem AES-256-GCM + AAD (klucz nie wraca w GET /config),
+      - deterministyczne wykrycie krytycznych wersji (PHP 7.4.33 EOL + WordPress 4.7 CVE-2017-1001000),
+      - integracja z OpenRouter (zmockowane httpx.Client.post) + tryb READ-ONLY (host i usługi nietknięte),
+      - potwierdzenie alertu (acknowledge) oraz pełna izolacja wg Asset Scope użytkownika.
+    """
+    from sqlalchemy import cast, delete, select
+    from sqlalchemy.dialects.postgresql import INET
+    from app.db.models import AiAgentConfig, AiAlert, Host, ScanRun, User
+    from app.db.session import SessionLocal
+    from app.schemas.contract import HostResult, HTTPFingerprintResult, ScanChunkResult, ServiceResult
+    from app.services import ai_agent as ai_mod
+    from app.services.ingest import ingest_scan_result
+
+    octet = (int(uuid4().hex[:2], 16) % 140) + 60
+    ip_vuln = f"198.51.{octet}.41"
+    ip_safe = f"198.51.{octet}.42"
+    scoped_user = f"ai_scoped_{uuid4().hex[:8]}"
+    scoped_pass = "AiScoped123!"
+    run_id = uuid4()
+    now = datetime.now(timezone.utc)
+
+    # Zapamiętaj ewentualną istniejącą konfigurację AI, żeby test jej nie skasował
+    saved_cfg_backup = None
+    with SessionLocal() as db:
+        existing_cfg = db.get(AiAgentConfig, "default")
+        if existing_cfg is not None:
+            saved_cfg_backup = {
+                "provider": existing_cfg.provider,
+                "base_url": existing_cfg.base_url,
+                "model_name": existing_cfg.model_name,
+                "api_key_encrypted": bytes(existing_cfg.api_key_encrypted),
+                "auto_analyze_after_scan": existing_cfg.auto_analyze_after_scan,
+                "is_active": existing_cfg.is_active,
+            }
+
+    def _cleanup():
+        with SessionLocal() as db:
+            db.execute(delete(User).where(User.username == scoped_user))
+            h_ids = list(
+                db.execute(
+                    select(Host.id).where(Host.ip_address.in_([cast(ip_vuln, INET), cast(ip_safe, INET)]))
+                ).scalars().all()
+            )
+            if h_ids:
+                db.execute(delete(AiAlert).where(AiAlert.host_id.in_(h_ids)))
+                db.execute(delete(Host).where(Host.id.in_(h_ids)))
+            db.execute(delete(ScanRun).where(ScanRun.id == run_id))
+            db.execute(delete(AiAgentConfig).where(AiAgentConfig.id == "default"))
+            if saved_cfg_backup is not None:
+                db.add(AiAgentConfig(id="default", **saved_cfg_backup))
+            db.commit()
+
+    _cleanup()
+    try:
+        # 1. Zasiej 2 hosty: podatny (PHP 7.4.33 + WordPress 4.7) i bezpieczny
+        with SessionLocal() as db:
+            ingest_scan_result(
+                db,
+                ScanChunkResult(
+                    scan_run_id=run_id,
+                    chunk_id=uuid4(),
+                    worker_id="worker-test-ai",
+                    status="completed",
+                    started_at=now,
+                    finished_at=now,
+                    hosts=[
+                        HostResult(
+                            ip=ip_vuln,
+                            hostname="wp-legacy.agh.local",
+                            is_up=True,
+                            services=[
+                                ServiceResult(
+                                    port=80,
+                                    protocol="tcp",
+                                    state="open",
+                                    service_name="http",
+                                    product="nginx",
+                                    version="1.20.1",
+                                    http=HTTPFingerprintResult(
+                                        url=f"http://{ip_vuln}/",
+                                        scheme="http",
+                                        status_code=200,
+                                        title="Old WordPress",
+                                        headers={"X-Powered-By": "PHP/7.4.33", "Server": "nginx/1.20.1"},
+                                        technologies=["WordPress 4.7", "PHP 7.4.33"],
+                                        is_admin_panel=True,
+                                    ),
+                                )
+                            ],
+                        ),
+                        HostResult(
+                            ip=ip_safe,
+                            hostname="clean.agh.local",
+                            is_up=True,
+                            services=[
+                                ServiceResult(
+                                    port=443,
+                                    protocol="tcp",
+                                    state="open",
+                                    service_name="https",
+                                    product="caddy",
+                                    http=HTTPFingerprintResult(
+                                        url=f"https://{ip_safe}/",
+                                        scheme="https",
+                                        status_code=200,
+                                        title="Clean App",
+                                        technologies=["Caddy"],
+                                    ),
+                                )
+                            ],
+                        ),
+                    ],
+                ),
+                target_cidr=f"198.51.{octet}.0/24",
+                is_partial=True,
+            )
+
+        with SessionLocal() as db:
+            h_vuln = db.execute(select(Host).where(Host.ip_address == cast(ip_vuln, INET))).scalar_one()
+            h_safe = db.execute(select(Host).where(Host.ip_address == cast(ip_safe, INET))).scalar_one()
+            vuln_id = str(h_vuln.id)
+            safe_id = str(h_safe.id)
+
+        # Mock wywołania OpenRouter (sprawdzamy, że przechodzi pełny format JSON + brak halucynacji)
+        def _fake_openrouter(cfg, telemetry, precheck):
+            if telemetry["ip_address"] == ip_vuln:
+                return (
+                    {
+                        "urgency": "critical",
+                        "requires_admin_alert": True,
+                        "title": "Pilny alert: PHP 7.4.33 (EOL) i WordPress 4.7",
+                        "affected_software": precheck["affected_software"],
+                        "cves": sorted(set(precheck["cves"]) | {"CVE-2017-1001000"}),
+                        "summary": "Wykryto niewspierany PHP 7.4.33 oraz podatnego WordPressa 4.7 z panelem admina na HTTP.",
+                        "admin_alert_message": f"[CRITICAL] Host {ip_vuln} wymaga pilnej aktualizacji PHP i WordPressa.",
+                        "remediation": "Zaktualizuj PHP do 8.3+ oraz WordPress do 6.x i włącz HTTPS.",
+                    },
+                    f"openrouter:{cfg.model_name}",
+                )
+            return (
+                {
+                    "urgency": "safe",
+                    "requires_admin_alert": False,
+                    "title": f"Host {ip_safe} — brak znanych podatnych wersji",
+                    "affected_software": [],
+                    "cves": [],
+                    "summary": "Nie wykryto przestarzałych ani podatnych wersji oprogramowania.",
+                    "admin_alert_message": None,
+                    "remediation": "Utrzymuj standardowe aktualizacje.",
+                },
+                f"openrouter:{cfg.model_name}",
+            )
+
+        monkeypatch.setattr(ai_mod, "_call_openrouter_for_host", _fake_openrouter)
+
+        with TestClient(app) as client:
+            admin_hdr = {"X-Dev-Role": "admin"}
+            ro_hdr = {"X-Dev-Role": "read_only"}
+
+            # 2. Zapis klucza API OpenRouter (RBAC: read_only -> 403, admin -> 200; klucz nie wraca)
+            assert (
+                client.put(
+                    "/api/v1/ai-agent/config",
+                    headers=ro_hdr,
+                    json={"api_key": "sk-or-v1-secret-test-key", "model_name": "google/gemini-2.5-flash"},
+                ).status_code
+                == 403
+            )
+            r_cfg = client.put(
+                "/api/v1/ai-agent/config",
+                headers=admin_hdr,
+                json={
+                    "api_key": "sk-or-v1-secret-test-key",
+                    "model_name": "google/gemini-2.5-flash",
+                    "auto_analyze_after_scan": True,
+                },
+            )
+            assert r_cfg.status_code == 200, r_cfg.text
+            cfg_json = r_cfg.json()
+            assert cfg_json["configured"] is True
+            assert cfg_json["has_api_key"] is True
+            assert "sk-or-v1-secret-test-key" not in r_cfg.text
+
+            # 3. Uruchom analizę AI na obu hostach
+            r_an = client.post(
+                "/api/v1/ai-agent/analyze",
+                headers=admin_hdr,
+                json={"host_ids": [vuln_id, safe_id]},
+            )
+            assert r_an.status_code == 200, r_an.text
+            an_body = r_an.json()
+            assert an_body["analyzed_count"] == 2
+            assert an_body["urgent_alerts_count"] == 1
+            alerts_by_ip = {a["ip_address"]: a for a in an_body["alerts"]}
+            assert alerts_by_ip[ip_vuln]["urgency"] == "critical"
+            assert alerts_by_ip[ip_vuln]["requires_admin_alert"] is True
+            assert "CVE-2017-1001000" in alerts_by_ip[ip_vuln]["cves"]
+            assert "CVE-2024-4577" in alerts_by_ip[ip_vuln]["cves"]
+            assert alerts_by_ip[ip_safe]["urgency"] == "safe"
+            assert alerts_by_ip[ip_safe]["requires_admin_alert"] is False
+
+            # 4. Potwierdzenie alertu (acknowledge)
+            vuln_alert_id = alerts_by_ip[ip_vuln]["id"]
+            r_ack = client.patch(
+                f"/api/v1/ai-agent/alerts/{vuln_alert_id}/acknowledge",
+                headers=admin_hdr,
+                json={"acknowledged": True},
+            )
+            assert r_ack.status_code == 200
+            assert r_ack.json()["acknowledged"] is True
+
+            # 5. Izolacja Asset Scope: konto ograniczone tylko do ip_safe NIE widzi alertu ip_vuln ani nie może go analizować
+            r_usr = client.post(
+                "/api/v1/rbac/users",
+                headers=admin_hdr,
+                json={
+                    "username": scoped_user,
+                    "email": f"{scoped_user}@cbi.agh.edu.pl",
+                    "password": scoped_pass,
+                    "role_name": "modify_read",
+                    "scope_restricted": True,
+                    "allowed_scope": {"ips": [ip_safe]},
+                },
+            )
+            assert r_usr.status_code == 201
+            r_login = client.post("/api/v1/auth/login", json={"username": scoped_user, "password": scoped_pass})
+            scoped_hdr = {"Authorization": f"Bearer {r_login.json()['access_token']}"}
+
+            scoped_alerts = client.get("/api/v1/ai-agent/alerts", headers=scoped_hdr).json()["alerts"]
+            assert {a["ip_address"] for a in scoped_alerts} == {ip_safe}
+            assert (
+                client.post(
+                    "/api/v1/ai-agent/analyze",
+                    headers=scoped_hdr,
+                    json={"host_ids": [vuln_id]},
+                ).status_code
+                == 403
+            )
+            assert (
+                client.patch(
+                    f"/api/v1/ai-agent/alerts/{vuln_alert_id}/acknowledge",
+                    headers=scoped_hdr,
+                    json={"acknowledged": False},
+                ).status_code
+                == 403
+            )
+    finally:
+        _cleanup()

@@ -11,11 +11,12 @@ import {
   Server,
   Shield,
 } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { apiFetch, downloadExport, hasPermission } from '../api';
-import type { ChangeEvent, DashboardSummary, HostSummary, ScanRunInfo, UserRole } from '../types';
+import type { ChangeEvent, DashboardSummary, HostSummary, ScanRunInfo, SignatureDraft, UserRole } from '../types';
 import { ChangeTypeBadge, formatTime, HostStatusBadge, SeverityBadge } from './Badges';
 import { ChangesTimelineChart } from './ChangesTimelineChart';
+import { HostDetailSheet } from './HostDetailSheet';
 import { Alert, AlertDescription } from './ui/alert';
 import { Badge } from './ui/badge';
 import { Button } from './ui/button';
@@ -29,15 +30,29 @@ interface Props {
   summary: DashboardSummary | null;
   onRefresh: () => void;
   onOpenGroupSearch?: (query: string) => void;
+  onCreateSignature?: (draft: SignatureDraft) => void;
 }
 
-export function DashboardTab({ role, hosts, changes, summary, onRefresh, onOpenGroupSearch }: Props) {
+export function DashboardTab({
+  role,
+  hosts,
+  changes,
+  summary,
+  onRefresh,
+  onOpenGroupSearch,
+  onCreateSignature,
+}: Props) {
   const [busy, setBusy] = useState(false);
   const [exportingFmt, setExportingFmt] = useState<'json' | 'csv' | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [latestRun, setLatestRun] = useState<ScanRunInfo | null>(null);
   const [groupMode, setGroupMode] = useState<'by_technology' | 'by_product' | 'by_favicon_mmh3'>('by_technology');
+  const [selectedHostId, setSelectedHostId] = useState<string | null>(null);
+
+  const handleCloseDetail = useCallback(() => {
+    setSelectedHostId(null);
+  }, []);
 
   useEffect(() => {
     apiFetch<ScanRunInfo[]>('/scans/runs?limit=1', role)
@@ -311,7 +326,14 @@ export function DashboardTab({ role, hosts, changes, summary, onRefresh, onOpenG
             </TableHeader>
             <TableBody>
               {topFindingsHosts.map((h) => (
-                <TableRow key={h.id}>
+                <TableRow
+                  key={h.id}
+                  onClick={() => {
+                    setError(null);
+                    setSelectedHostId(h.id);
+                  }}
+                  className="cursor-pointer"
+                >
                   <TableCell>
                     <div className="font-mono font-semibold text-foreground">{h.ip_address}</div>
                     <div className="text-[11px] text-muted-foreground">
@@ -423,6 +445,16 @@ export function DashboardTab({ role, hosts, changes, summary, onRefresh, onOpenG
           </Table>
         </CardContent>
       </Card>
+
+      {/* Panel boczny szczegółów hosta po kliknięciu w Najważniejsze znaleziska */}
+      <HostDetailSheet
+        hostId={selectedHostId}
+        onClose={handleCloseDetail}
+        role={role}
+        onRefresh={onRefresh}
+        onCreateSignature={onCreateSignature}
+        onError={setError}
+      />
     </div>
   );
 }
