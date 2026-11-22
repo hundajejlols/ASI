@@ -18,6 +18,7 @@ from app.services.scheduler import (
     tick_schedules,
     validate_cron_expression,
 )
+from app.services.scope import resolve_principal_scope
 from app.services.seed import ensure_default_group_and_profile
 
 router = APIRouter(prefix="/schedules", tags=["schedules"])
@@ -101,13 +102,19 @@ def _to_out(sched: ScanSchedule) -> ScheduleOut:
 @router.get("", response_model=list[ScheduleOut])
 def list_schedules(
     db: Session = Depends(get_db),
-    _principal: Principal = Depends(require_permission("read")),
+    principal: Principal = Depends(require_permission("read")),
 ) -> list[ScheduleOut]:
-    rows = db.execute(
+    scope = resolve_principal_scope(db, principal)
+    stmt = (
         select(ScanSchedule)
         .options(selectinload(ScanSchedule.target_group))
         .order_by(desc(ScanSchedule.created_at))
-    ).scalars().all()
+    )
+    if scope.restricted:
+        if not scope.allowed_group_ids:
+            return []
+        stmt = stmt.where(ScanSchedule.target_group_id.in_(scope.allowed_group_ids))
+    rows = db.execute(stmt).scalars().all()
     return [_to_out(r) for r in rows]
 
 
@@ -137,6 +144,13 @@ def create_schedule(
     group = db.get(TargetGroup, payload.target_group_id) if payload.target_group_id else default_group
     if group is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Nie znaleziono grupy celów.")
+
+    scope = resolve_principal_scope(db, principal)
+    if scope.restricted and group.id not in scope.allowed_group_ids:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Konto z ograniczonym zakresem może tworzyć harmonogramy tylko dla grup przypisanych do jego zakresu.",
+        )
 
     profile = db.get(ScanProfile, payload.profile_id) if payload.profile_id else default_profile
     if profile is None:
@@ -172,6 +186,13 @@ def update_schedule(
     if sched is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Nie znaleziono harmonogramu.")
 
+    scope = resolve_principal_scope(db, principal)
+    if scope.restricted and sched.target_group_id not in scope.allowed_group_ids:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Brak dostępu do harmonogramu spoza przypisanego zakresu konta.",
+        )
+
     fields = payload.model_fields_set
     try:
         if "name" in fields and payload.name is not None:
@@ -194,6 +215,11 @@ def update_schedule(
             new_grp = db.get(TargetGroup, payload.target_group_id)
             if new_grp is None:
                 raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Nie znaleziono grupy celów.")
+            if scope.restricted and new_grp.id not in scope.allowed_group_ids:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Konto z ograniczonym zakresem nie może przypisać harmonogramu do tej grupy.",
+                )
             sched.target_group_id = new_grp.id
         if "cron_expression" in fields and payload.cron_expression is not None:
             sched.cron_expression = validate_cron_expression(payload.cron_expression)
@@ -225,6 +251,12 @@ def delete_schedule(
     sched = db.get(ScanSchedule, schedule_id)
     if sched is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Nie znaleziono harmonogramu.")
+    scope = resolve_principal_scope(db, principal)
+    if scope.restricted and sched.target_group_id not in scope.allowed_group_ids:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Brak dostępu do harmonogramu spoza przypisanego zakresu konta.",
+        )
     sched_name = sched.name
     db.delete(sched)
     record_audit_event(db, principal, action="schedule.delete", resource_type="scan_schedule", resource_id=str(schedule_id), details={"name": sched_name})

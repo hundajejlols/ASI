@@ -7,10 +7,11 @@ from sqlalchemy import desc, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.core.security import Principal, require_permission
-from app.db.models import ChangeEvent
+from app.db.models import ChangeEvent, Host
 from app.db.session import get_db
 from app.schemas.api import ChangeEventOut
 from app.services.audit import record_audit_event
+from app.services.scope import resolve_principal_scope
 
 router = APIRouter(prefix="/changes", tags=["changes"])
 
@@ -57,8 +58,11 @@ def list_changes(
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
-    _principal: Principal = Depends(require_permission("read")),
+    principal: Principal = Depends(require_permission("read")),
 ) -> list[ChangeEventOut]:
+    scope = resolve_principal_scope(db, principal)
+    scope_flt = scope.sql_host_filter()
+
     stmt = (
         select(ChangeEvent)
         .options(selectinload(ChangeEvent.host), selectinload(ChangeEvent.service))
@@ -66,6 +70,8 @@ def list_changes(
         .limit(limit)
         .offset(offset)
     )
+    if scope_flt is not None:
+        stmt = stmt.join(Host, Host.id == ChangeEvent.host_id).where(scope_flt)
     if scan_run_id is not None:
         stmt = stmt.where(ChangeEvent.scan_run_id == scan_run_id)
     if change_type is not None:
@@ -92,6 +98,12 @@ def acknowledge_change(
     ).scalar_one_or_none()
     if ev is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Nie znaleziono zdarzenia zmiany.")
+
+    scope = resolve_principal_scope(db, principal)
+    if scope.restricted:
+        if ev.host is None:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Brak dostępu do zdarzenia spoza zakresu konta.")
+        scope.assert_host_allowed(ev.host)
 
     ev.acknowledged = payload.acknowledged
     record_audit_event(

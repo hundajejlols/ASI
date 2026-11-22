@@ -303,6 +303,7 @@ def build_per_host_generic_findings_reports(
     only_interesting: bool = False,
     default_product_type_name: str = DEFAULT_PRODUCT_TYPE_NAME,
     engagement_name: str = DEFAULT_ENGAGEMENT_NAME,
+    scope: Any = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """
     Buduje osobne raporty DefectDojo Generic Findings Import (JSON) dla każdego hosta (1 IP = 1 Asset).
@@ -324,6 +325,10 @@ def build_per_host_generic_findings_reports(
     )
     if host_ids:
         stmt = stmt.where(Host.id.in_(host_ids))
+    if scope is not None:
+        scope_flt = scope.sql_host_filter()
+        if scope_flt is not None:
+            stmt = stmt.where(scope_flt)
 
     hosts = db.execute(stmt).scalars().all()
 
@@ -688,6 +693,7 @@ def export_to_defectdojo(
     close_old_findings: bool | None = None,
     dry_run: bool = False,
     max_assets: int = DEFAULT_MAX_EXPORT_ASSETS,
+    scope: Any = None,
 ) -> dict[str, Any]:
     """
     Eksportuje obserwacje do DefectDojo API v2 w modelu 1 IP = 1 Asset (Product):
@@ -718,6 +724,7 @@ def export_to_defectdojo(
         only_interesting=only_interesting,
         default_product_type_name=default_pt,
         engagement_name=engagement_name,
+        scope=scope,
     )
 
     # Ponieważ każde IP ma własny Asset i Test, close_old_findings działa bezpiecznie w obrębie jednego IP

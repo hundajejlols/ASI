@@ -262,6 +262,16 @@ def seed_default_signatures(db: Session) -> int:
     )
     db.execute(
         text(
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS scope_restricted BOOLEAN NOT NULL DEFAULT FALSE"
+        )
+    )
+    db.execute(
+        text(
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS allowed_scope JSONB NOT NULL DEFAULT '{}'::jsonb"
+        )
+    )
+    db.execute(
+        text(
             "ALTER TABLE target_groups ADD COLUMN IF NOT EXISTS group_type VARCHAR(16) NOT NULL DEFAULT 'static'"
         )
     )

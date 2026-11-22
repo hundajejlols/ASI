@@ -101,6 +101,8 @@ class User(Base):
     password_hash: Mapped[str] = mapped_column(Text, nullable=False)
     role: Mapped[str] = mapped_column(user_role_enum, nullable=False, default="read_only")
     custom_role_name: Mapped[str | None] = mapped_column(String(64), ForeignKey("rbac_roles.name", ondelete="SET NULL"))
+    scope_restricted: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    allowed_scope: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())

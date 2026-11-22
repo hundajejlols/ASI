@@ -29,6 +29,7 @@ from app.services.groups import (
     resolve_hosts_by_rules,
     serialize_filter_rules,
 )
+from app.services.scope import ResolvedScope, resolve_principal_scope
 
 router = APIRouter(prefix="/groups", tags=["groups"])
 
@@ -83,9 +84,9 @@ class SavedGroupOut(BaseModel):
     created_at: datetime
 
 
-def _serialize_saved_group(db: Session, grp: TargetGroup) -> SavedGroupOut:
+def _serialize_saved_group(db: Session, grp: TargetGroup, *, scope: ResolvedScope | None = None) -> SavedGroupOut:
     if grp.group_type == "dynamic":
-        resolved = resolve_hosts_by_rules(db, grp.filter_rules)
+        resolved = resolve_hosts_by_rules(db, grp.filter_rules, scope=scope)
         return SavedGroupOut(
             id=grp.id,
             name=grp.name,
@@ -102,8 +103,10 @@ def _serialize_saved_group(db: Session, grp: TargetGroup) -> SavedGroupOut:
         )
 
     targets = db.execute(
-        select(Target.raw_value).where(Target.group_id == grp.id, Target.is_active.is_(True))
+        select(Target).where(Target.group_id == grp.id, Target.is_active.is_(True))
     ).scalars().all()
+    if scope is not None and scope.restricted:
+        targets = [t for t in targets if scope.is_target_allowed(t.raw_value, t.type)]
     return SavedGroupOut(
         id=grp.id,
         name=grp.name,
@@ -113,7 +116,7 @@ def _serialize_saved_group(db: Session, grp: TargetGroup) -> SavedGroupOut:
         filter_rules={},
         member_count=len(targets),
         host_ids=[],
-        sample_ips=[str(t) for t in targets[:8]],
+        sample_ips=[str(t.raw_value) for t in targets[:8]],
         matched_ports=[],
         suggested_ports_spec=None,
         created_at=grp.created_at,
@@ -123,20 +126,22 @@ def _serialize_saved_group(db: Session, grp: TargetGroup) -> SavedGroupOut:
 @router.get("/auto")
 def get_auto_groups(
     db: Session = Depends(get_db),
-    _principal: Principal = Depends(require_permission("read")),
+    principal: Principal = Depends(require_permission("read")),
 ) -> dict[str, Any]:
     """Zwraca automatycznie wykryte grupy (technologie/CMS, otwarte porty, flagi, sygnatury, jednostki/tagi) oraz facets."""
-    return discover_auto_groups(db)
+    scope = resolve_principal_scope(db, principal)
+    return discover_auto_groups(db, scope=scope)
 
 
 @router.post("/preview")
 def preview_group_rules(
     payload: GroupFilterRules,
     db: Session = Depends(get_db),
-    _principal: Principal = Depends(require_permission("read")),
+    principal: Principal = Depends(require_permission("read")),
 ) -> dict[str, Any]:
     """Podgląd hostów i portów pasujących do wskazanych reguł grupy dynamicznej."""
-    return resolve_hosts_by_rules(db, payload)
+    scope = resolve_principal_scope(db, principal)
+    return resolve_hosts_by_rules(db, payload, scope=scope)
 
 
 @router.post("/scan")
@@ -149,6 +154,7 @@ def scan_group(
     Uruchamia celowany skan (lub dry_run) na zapisanej grupie dynamicznej albo ad-hoc regułach auto-grupy.
     Domyślnie używa pełnego profilu skanowania (ports_mode='profile'); opcjonalnie 'matched_ports' lub 'custom'.
     """
+    scope = resolve_principal_scope(db, principal)
     target_group_id: UUID | None = None
     group_label = (payload.group_label or "").strip()
 
@@ -163,9 +169,9 @@ def scan_group(
             )
         target_group_id = grp.id
         group_label = group_label or grp.name
-        resolved = resolve_hosts_by_rules(db, grp.filter_rules)
+        resolved = resolve_hosts_by_rules(db, grp.filter_rules, scope=scope)
     elif payload.filter_rules is not None:
-        resolved = resolve_hosts_by_rules(db, payload.filter_rules)
+        resolved = resolve_hosts_by_rules(db, payload.filter_rules, scope=scope)
         group_label = group_label or "Ad-hoc Smart Group"
     else:
         raise HTTPException(
@@ -237,13 +243,21 @@ def scan_group(
 def list_groups(
     include_static: bool = Query(default=False, description="Gdy true, zwraca również statyczne grupy celów (np. local-lab)."),
     db: Session = Depends(get_db),
-    _principal: Principal = Depends(require_permission("read")),
+    principal: Principal = Depends(require_permission("read")),
 ) -> list[SavedGroupOut]:
+    scope = resolve_principal_scope(db, principal)
     stmt = select(TargetGroup).order_by(desc(TargetGroup.created_at))
     if not include_static:
         stmt = stmt.where(TargetGroup.group_type == "dynamic")
     rows = db.execute(stmt).scalars().all()
-    return [_serialize_saved_group(db, g) for g in rows]
+    serialized = [_serialize_saved_group(db, g, scope=scope) for g in rows]
+    if scope.restricted:
+        # Pokaż grupy jawnie przypisane kontu albo dopasowujące przynajmniej 1 host w zakresie konta
+        serialized = [
+            g for g in serialized
+            if (g.id in scope.allowed_group_ids or g.member_count > 0)
+        ]
+    return serialized
 
 
 @router.post("", response_model=SavedGroupOut, status_code=status.HTTP_201_CREATED)
@@ -252,6 +266,7 @@ def create_dynamic_group(
     db: Session = Depends(get_db),
     principal: Principal = Depends(require_permission("add")),
 ) -> SavedGroupOut:
+    scope = resolve_principal_scope(db, principal)
     name = payload.name.strip()
     if len(name) < 2:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Nazwa grupy musi mieć co najmniej 2 znaki.")
@@ -278,20 +293,21 @@ def create_dynamic_group(
     )
     db.commit()
     db.refresh(grp)
-    return _serialize_saved_group(db, grp)
+    return _serialize_saved_group(db, grp, scope=scope)
 
 
 @router.get("/{group_id}/members")
 def get_group_members(
     group_id: UUID,
     db: Session = Depends(get_db),
-    _principal: Principal = Depends(require_permission("read")),
+    principal: Principal = Depends(require_permission("read")),
 ) -> dict[str, Any]:
+    scope = resolve_principal_scope(db, principal)
     grp = db.get(TargetGroup, group_id)
     if grp is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Nie znaleziono grupy.")
     if grp.group_type == "dynamic":
-        resolved = resolve_hosts_by_rules(db, grp.filter_rules)
+        resolved = resolve_hosts_by_rules(db, grp.filter_rules, scope=scope)
         return {
             "group_id": str(grp.id),
             "name": grp.name,
@@ -301,6 +317,8 @@ def get_group_members(
     targets = db.execute(
         select(Target).where(Target.group_id == grp.id, Target.is_active.is_(True))
     ).scalars().all()
+    if scope.restricted:
+        targets = [t for t in targets if scope.is_target_allowed(t.raw_value, t.type)]
     return {
         "group_id": str(grp.id),
         "name": grp.name,
@@ -322,6 +340,12 @@ def update_dynamic_group(
     db: Session = Depends(get_db),
     principal: Principal = Depends(require_permission("modify")),
 ) -> SavedGroupOut:
+    scope = resolve_principal_scope(db, principal)
+    if scope.restricted and group_id in scope.allowed_group_ids:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Nie możesz edytować reguł grupy definiującej zakres widoczności Twojego konta.",
+        )
     grp = db.get(TargetGroup, group_id)
     if grp is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Nie znaleziono grupy.")
@@ -359,7 +383,7 @@ def update_dynamic_group(
     )
     db.commit()
     db.refresh(grp)
-    return _serialize_saved_group(db, grp)
+    return _serialize_saved_group(db, grp, scope=scope)
 
 
 @router.delete("/{group_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -368,6 +392,12 @@ def delete_dynamic_group(
     db: Session = Depends(get_db),
     principal: Principal = Depends(require_permission("delete")),
 ) -> None:
+    scope = resolve_principal_scope(db, principal)
+    if scope.restricted and group_id in scope.allowed_group_ids:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Nie możesz usunąć grupy definiującej zakres widoczności Twojego konta.",
+        )
     grp = db.get(TargetGroup, group_id)
     if grp is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Nie znaleziono grupy.")

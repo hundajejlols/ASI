@@ -24,6 +24,7 @@ from app.schemas.api import (
     SignatureMatchOut,
 )
 from app.services.queries import fetch_latest_http_fingerprints
+from app.services.scope import resolve_principal_scope
 
 router = APIRouter(prefix="/hosts", tags=["hosts"])
 
@@ -94,9 +95,13 @@ def list_hosts(
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
-    _principal: Principal = Depends(require_permission("read")),
+    principal: Principal = Depends(require_permission("read")),
 ) -> list[HostSummaryOut]:
+    scope = resolve_principal_scope(db, principal)
     base_filter = []
+    scope_flt = scope.sql_host_filter()
+    if scope_flt is not None:
+        base_filter.append(scope_flt)
     if host_status:
         base_filter.append(Host.status == host_status)
     if search and search.strip():
@@ -228,7 +233,7 @@ def list_hosts(
 def get_host_detail(
     host_id: UUID,
     db: Session = Depends(get_db),
-    _principal: Principal = Depends(require_permission("read")),
+    principal: Principal = Depends(require_permission("read")),
 ) -> HostDetailOut:
     host = db.execute(
         select(Host)
@@ -243,6 +248,9 @@ def get_host_detail(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Nie znaleziono hosta o podanym ID.",
         )
+
+    scope = resolve_principal_scope(db, principal)
+    scope.assert_host_allowed(host)
 
     host_override = db.execute(
         select(AssetOverride).where(

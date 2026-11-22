@@ -87,6 +87,7 @@ def _load_candidate_hosts(
     db: Session,
     statuses: list[str] | None,
     cidr_scope: str | None,
+    scope: Any = None,
 ) -> tuple[list[Host], dict[UUID, Any], dict[UUID, AssetOverride]]:
     stmt = (
         select(Host)
@@ -104,6 +105,11 @@ def _load_candidate_hosts(
 
     if cidr_scope:
         stmt = stmt.where(Host.ip_address.op("<<=")(cast(cidr_scope, CIDR)))
+
+    if scope is not None:
+        scope_flt = scope.sql_host_filter()
+        if scope_flt is not None:
+            stmt = stmt.where(scope_flt)
 
     hosts = db.execute(stmt).scalars().all()
     if not hosts:
@@ -128,13 +134,14 @@ def resolve_hosts_by_rules(
     raw_rules: GroupFilterRules | dict[str, Any] | None,
     *,
     limit: int = 2000,
+    scope: Any = None,
 ) -> dict[str, Any]:
     """
     Rozwiązuje dynamiczną listę hostów spełniających reguły `filter_rules`
     wraz ze zbiorem dopasowanych portów dla szybkiego skanu celowanego.
     """
     rules = parse_filter_rules(raw_rules)
-    hosts, latest_fp_map, ov_map = _load_candidate_hosts(db, rules.statuses, rules.cidr_scope)
+    hosts, latest_fp_map, ov_map = _load_candidate_hosts(db, rules.statuses, rules.cidr_scope, scope=scope)
 
     tech_needles = [t.lower() for t in rules.technologies]
     port_set = set(rules.ports)
@@ -312,7 +319,7 @@ def resolve_hosts_by_rules(
     }
 
 
-def discover_auto_groups(db: Session) -> dict[str, Any]:
+def discover_auto_groups(db: Session, *, scope: Any = None) -> dict[str, Any]:
     """
     Wylicza na żywo gotowe grupy automatyczne (zero-config) na podstawie aktualnych zasobów w DB:
       - Technologie / CMS (np. WordPress, PHP, nginx, LegacyCMS...)
@@ -322,7 +329,7 @@ def discover_auto_groups(db: Session) -> dict[str, Any]:
       - Jednostki organizacyjne (owner_unit) i tagi z asset_overrides
     Zwraca też słownik `facets` do podpowiedzi w kreatorze Smart Groups.
     """
-    hosts, latest_fp_map, ov_map = _load_candidate_hosts(db, None, None)
+    hosts, latest_fp_map, ov_map = _load_candidate_hosts(db, None, None, scope=scope)
 
     tech_hosts: dict[str, dict[str, Any]] = {}
     port_hosts: dict[int, dict[str, Any]] = {}

@@ -10,7 +10,7 @@ Uwierzytelnianie JWT (HS256) oraz elastyczny RBAC (4 role wbudowane + role włas
 from __future__ import annotations
 
 import base64
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 import hashlib
 import hmac
@@ -57,6 +57,8 @@ class Principal:
     permissions: frozenset[str]
     auth_mode: str  # "jwt" | "dev_header"
     user_id: UUID | None = None
+    scope_restricted: bool = False
+    allowed_scope: dict[str, Any] = field(default_factory=dict)
 
     @property
     def value(self) -> str:
@@ -188,6 +190,8 @@ def get_current_principal(
 
         role_name = str(claims.get("role") or "")
         username = str(claims.get("username") or "jwt-user")
+        scope_restricted = False
+        allowed_scope: dict[str, Any] = {}
         if uid is not None:
             user = db.get(User, uid)
             if user is None or not user.is_active:
@@ -197,6 +201,8 @@ def get_current_principal(
                 )
             username = user.username
             role_name = user.custom_role_name or user.role
+            scope_restricted = bool(user.scope_restricted)
+            allowed_scope = dict(user.allowed_scope or {})
 
         perms = resolve_role_permissions(db, role_name)
         if perms is None:
@@ -210,6 +216,8 @@ def get_current_principal(
             permissions=frozenset(perms),
             auth_mode="jwt",
             user_id=uid,
+            scope_restricted=scope_restricted,
+            allowed_scope=allowed_scope,
         )
 
     if settings.allow_dev_role_header and x_dev_role is not None:

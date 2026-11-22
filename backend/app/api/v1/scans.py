@@ -59,6 +59,7 @@ from app.services.chunker import (
 )
 from app.services.ingest import ingest_scan_result
 from app.services.queries import fetch_latest_http_fingerprints
+from app.services.scope import resolve_principal_scope
 from app.services.seed import ensure_default_group_and_profile
 
 router = APIRouter(prefix="/scans", tags=["scans"])
@@ -131,6 +132,7 @@ def start_scan(
     Uruchamia skan: scala nakładające się zakresy CIDR, dzieli na paczki (statycznie lub adaptacyjnie wg szybkości skanowania),
     tworzy scan_runs i scan_chunks oraz wrzuca paczki na Redis z window_deadline_utc i aktywnymi sygnaturami.
     """
+    scope = resolve_principal_scope(db, principal)
     try:
         res = start_scan_run(
             db,
@@ -143,6 +145,7 @@ def start_scan(
             ports_override=payload.ports,
             window_minutes=payload.window_minutes,
             dry_run=payload.dry_run,
+            scope=scope,
         )
         if not payload.dry_run:
             record_audit_event(
@@ -281,25 +284,31 @@ def compare_two_scan_runs(
     run_a: UUID = Query(..., description="ID wcześniejszego/bazowego przebiegu skanu"),
     run_b: UUID = Query(..., description="ID drugiego/porównywanego przebiegu skanu"),
     db: Session = Depends(get_db),
-    _principal: Principal = Depends(require_permission("read")),
+    principal: Principal = Depends(require_permission("read")),
 ) -> dict[str, Any]:
     """
     Porównuje dwa dowolne przebiegi skanów (Run A vs Run B):
     - różnice wykrytych endpointów HTTP/HTTPS (nowe, zniknięte, zmienione status_code/title/technologies/TLS/admin/staging),
     - wszystkie zdarzenia Diff (change_events) zarejestrowane pomiędzy czasem Run A a Run B.
     """
+    scope = resolve_principal_scope(db, principal)
+    scope_flt = scope.sql_host_filter()
+
     sr_a = db.get(ScanRun, run_a)
     sr_b = db.get(ScanRun, run_b)
     if sr_a is None or sr_b is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Nie znaleziono jednego lub obu przebiegów skanu.")
 
     def _snapshot_for_run(run_id: UUID) -> dict[str, dict[str, Any]]:
-        rows = db.execute(
+        snap_stmt = (
             select(HTTPFingerprint, Service, Host)
             .join(Service, Service.id == HTTPFingerprint.service_id)
             .join(Host, Host.id == Service.host_id)
             .where(HTTPFingerprint.scan_run_id == run_id)
-        ).all()
+        )
+        if scope_flt is not None:
+            snap_stmt = snap_stmt.where(scope_flt)
+        rows = db.execute(snap_stmt).all()
         snap: dict[str, dict[str, Any]] = {}
         for fp, svc, host in rows:
             ip_str = str(host.ip_address).split("/")[0]
@@ -355,13 +364,16 @@ def compare_two_scan_runs(
     # Zdarzenia change_events między oknem czasowym run_a i run_b
     t_start = min(sr_a.created_at, sr_b.created_at)
     t_end = max(sr_a.finished_at or sr_a.created_at, sr_b.finished_at or sr_b.created_at)
-    events_between = db.execute(
+    events_stmt = (
         select(ChangeEvent)
         .options(selectinload(ChangeEvent.host), selectinload(ChangeEvent.service))
         .where(ChangeEvent.detected_at >= t_start, ChangeEvent.detected_at <= t_end)
         .order_by(desc(ChangeEvent.detected_at))
         .limit(200)
-    ).scalars().all()
+    )
+    if scope_flt is not None:
+        events_stmt = events_stmt.join(Host, Host.id == ChangeEvent.host_id).where(scope_flt)
+    events_between = db.execute(events_stmt).scalars().all()
 
     return {
         "run_a": _serialize_scan_run(sr_a),
@@ -449,8 +461,9 @@ def trigger_reprobe_unstable(
     principal: Principal = Depends(require_permission("add")),
 ) -> dict[str, Any]:
     """Uruchamia powtórny pomiar wyłącznie dla hostów oznaczonych jako 'unstable'."""
+    scope = resolve_principal_scope(db, principal)
     try:
-        res = reprobe_unstable_hosts(db, window_minutes=window_minutes)
+        res = reprobe_unstable_hosts(db, window_minutes=window_minutes, scope=scope)
         if res.get("queued"):
             record_audit_event(db, principal, action="scan.reprobe_unstable", resource_type="scan_run", resource_id=str(res.get("scan_run_id")), details={"unstable_hosts_count": res.get("unstable_hosts_count")})
             db.commit()
@@ -464,19 +477,21 @@ def enqueue_lab_demo(
     target_cidr: str = "172.28.0.10/31",
     window_minutes: int = 30,
     db: Session = Depends(get_db),
-    _principal: Principal = Depends(require_permission("add")),
+    principal: Principal = Depends(require_permission("add")),
 ) -> dict:
     """
     Demo endpoint: tworzy rekordy scan_runs i scan_chunks w PostgreSQL
     oraz wrzuca paczkę testową na kolejkę Redis (lab_net) z aktywnymi sygnaturami.
     """
+    scope = resolve_principal_scope(db, principal)
     try:
-        target_cidr, _ = detect_target_type(target_cidr)
+        target_cidr, target_type = detect_target_type(target_cidr)
     except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=str(exc),
         ) from exc
+    scope.assert_targets_allowed([(target_cidr, target_type)])
 
     group, profile = ensure_default_group_and_profile(db)
 
@@ -572,6 +587,9 @@ def submit_manual_finding(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=f"Nieprawidłowy adres IP: {payload.ip_address!r}",
         ) from exc
+
+    scope = resolve_principal_scope(db, principal)
+    scope.assert_ip_allowed(ip_str)
 
     now = datetime.now(timezone.utc)
     http_fp: HTTPFingerprintResult | None = None
@@ -861,6 +879,10 @@ async def import_scan_results(
         except Exception as exc:
             raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=f"Nieprawidłowy kontrakt JSON: {exc}") from exc
 
+        scope = resolve_principal_scope(db, principal)
+        if scope.restricted:
+            scope.assert_targets_allowed([(h.ip, "ip") for h in scan_result.hosts])
+
         res = ingest_scan_result(db=db, payload=scan_result, target_cidr=effective_cidr, is_partial=True)
         record_audit_event(db, principal, action="scan.import_json", resource_type="scan_run", resource_id=str(res.get("scan_run_id")), details={"filename": file.filename, "hosts": res.get("hosts_processed")})
         db.commit()
@@ -985,6 +1007,10 @@ async def import_scan_results(
             detail="Plik CSV nie zawiera żadnych poprawnych rekordów hostów (wymagana kolumna 'ip' lub 'ip_address').",
         )
 
+    scope = resolve_principal_scope(db, principal)
+    if scope.restricted:
+        scope.assert_targets_allowed([(ip_k, "ip") for ip_k in hosts_by_ip.keys()])
+
     scan_result = ScanChunkResult(
         scan_run_id=uuid4(),
         chunk_id=uuid4(),
@@ -1004,13 +1030,16 @@ async def import_scan_results(
 def export_scan_state(
     format: Literal["json", "csv"] = Query(default="json"),
     db: Session = Depends(get_db),
-    _principal: Principal = Depends(require_permission("read")),
+    principal: Principal = Depends(require_permission("read")),
 ):
     """
     Eksport aktualnego stanu zasobów (hosty, usługi, technologie, dopasowane sygnatury oraz nadpisania).
     Zoptymalizowany zapytaniem batchowym DISTINCT ON (eliminacja N+1).
     """
-    hosts = db.execute(
+    scope = resolve_principal_scope(db, principal)
+    scope_flt = scope.sql_host_filter()
+
+    export_stmt = (
         select(Host)
         .options(
             selectinload(Host.services)
@@ -1018,7 +1047,10 @@ def export_scan_state(
             .selectinload(SignatureMatch.signature)
         )
         .order_by(Host.ip_address)
-    ).scalars().all()
+    )
+    if scope_flt is not None:
+        export_stmt = export_stmt.where(scope_flt)
+    hosts = db.execute(export_stmt).scalars().all()
 
     host_ids = [h.id for h in hosts]
     all_service_ids = [s.id for h in hosts for s in h.services]

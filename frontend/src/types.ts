@@ -27,12 +27,35 @@ export interface RoleItem {
   created_at?: string | null;
 }
 
+export interface UserScopeConfig {
+  ips: string[];
+  cidrs: string[];
+  ip_ranges: string[];
+  group_ids: string[];
+  host_ids: string[];
+}
+
+export interface UserScopeSummary {
+  restricted: boolean;
+  matched_hosts_count: number;
+  sample_ips: string[];
+  ips_count: number;
+  cidrs_count: number;
+  ip_ranges_count: number;
+  group_ids_count: number;
+  host_ids_count: number;
+  group_names: string[];
+}
+
 export interface UserItem {
   id: string;
   username: string;
   email: string;
   role: string;
   is_active: boolean;
+  scope_restricted: boolean;
+  allowed_scope: UserScopeConfig;
+  scope_summary?: UserScopeSummary;
   created_at: string;
 }
 
@@ -51,6 +74,8 @@ export interface AuthSession {
   username: string;
   role: string;
   permissions: string[];
+  scope_restricted?: boolean;
+  scope_summary?: UserScopeSummary | null;
 }
 
 export interface OverrideOut {

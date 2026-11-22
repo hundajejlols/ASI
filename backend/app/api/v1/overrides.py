@@ -10,6 +10,7 @@ from app.db.models import AssetOverride, Host, Service
 from app.db.session import get_db
 from app.schemas.api import OverrideOut, OverridePatchRequest
 from app.services.audit import record_audit_event
+from app.services.scope import resolve_principal_scope
 
 router = APIRouter(prefix="/overrides", tags=["overrides"])
 
@@ -25,18 +26,27 @@ def upsert_override(
     Dostępne dla ról: admin, add_delete_modify, modify_read.
     Kolejne skany nigdy nie modyfikują tej tabeli.
     """
+    scope = resolve_principal_scope(db, principal)
     if payload.entity_type == "host":
-        if db.get(Host, payload.entity_id) is None:
+        host = db.get(Host, payload.entity_id)
+        if host is None:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Nie znaleziono hosta o podanym entity_id.",
             )
+        scope.assert_host_allowed(host)
     else:
-        if db.get(Service, payload.entity_id) is None:
+        svc = db.get(Service, payload.entity_id)
+        if svc is None:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Nie znaleziono usługi o podanym entity_id.",
             )
+        if scope.restricted:
+            parent_host = db.get(Host, svc.host_id)
+            if parent_host is None:
+                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Brak dostępu do usługi spoza zakresu konta.")
+            scope.assert_host_allowed(parent_host)
 
     ov = db.execute(
         select(AssetOverride).where(

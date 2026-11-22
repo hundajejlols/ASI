@@ -1273,3 +1273,343 @@ def test_automatic_groups_smart_groups_targeted_scan_and_port_protection():
             assert svc_8080.state == "closed" and svc_8080.missed_scans == 3
     finally:
         _cleanup()
+
+
+def test_user_scope_visibility_and_enforcement():
+    """
+    Test end-to-end ograniczania widoczności per konto użytkownika (Asset Scope / ABAC):
+      - fail-closed dla pustego ograniczonego zakresu (0 hostów, 0 KPI),
+      - edycja konta PATCH /rbac/users/{id} + podgląd na żywo /rbac/users/scope-preview
+        (przypisanie pojedynczego IP, zakresu start-koniec oraz dynamicznej Smart Group),
+      - egzekwowanie zakresu na /hosts, /hosts/{id}, /dashboard/summary, /changes,
+        /overrides, /groups/auto, /scans/start (w tym blokada szerszego CIDR),
+        /scans/export oraz /integrations/defectdojo/export,
+      - blokada eskalacji uprawnień przez ograniczonego admina (nie może zdjąć sobie zakresu
+        ani zmienić reguł grupy przypisanej do swojego zakresu).
+    """
+    from sqlalchemy import cast, delete, select
+    from sqlalchemy.dialects.postgresql import INET
+    from app.db.models import AssetOverride, ChangeEvent, Host, ScanRun, TargetGroup, User
+    from app.db.session import SessionLocal
+    from app.schemas.contract import HostResult, HTTPFingerprintResult, ScanChunkResult, ServiceResult
+    from app.services.ingest import ingest_scan_result
+
+    octet = (int(uuid4().hex[:2], 16) % 150) + 50
+    ip_explicit = f"198.51.{octet}.10"
+    ip_in_range = f"198.51.{octet}.22"
+    ip_range_spec = f"198.51.{octet}.20-198.51.{octet}.25"
+    ip_in_group = f"198.51.{octet}.30"
+    ip_forbidden = f"198.51.{octet}.99"
+    all_ips = [ip_explicit, ip_in_range, ip_in_group, ip_forbidden]
+
+    unique_tag = f"ScopeTech-{uuid4().hex[:6]}"
+    forbidden_tech = f"SecretTech-{uuid4().hex[:6]}"
+    grp_name = f"scope-smart-{uuid4().hex[:8]}"
+    scoped_username = f"scoped_adm_{uuid4().hex[:8]}"
+    scoped_email = f"{scoped_username}@cbi.agh.edu.pl"
+    scoped_pass = "ScopedPass123!"
+    now = datetime.now(timezone.utc)
+    created_run_id = uuid4()
+
+    def _cleanup():
+        with SessionLocal() as db:
+            db.execute(delete(User).where(User.username == scoped_username))
+            db.execute(delete(TargetGroup).where(TargetGroup.name == grp_name))
+            h_ids = list(
+                db.execute(select(Host.id).where(Host.ip_address.in_([cast(ip, INET) for ip in all_ips]))).scalars().all()
+            )
+            if h_ids:
+                db.execute(delete(AssetOverride).where(AssetOverride.entity_id.in_(h_ids)))
+                db.execute(delete(Host).where(Host.id.in_(h_ids)))
+            db.execute(delete(ScanRun).where(ScanRun.id == created_run_id))
+            db.commit()
+
+    _cleanup()
+    try:
+        # 1. Zasiej 4 hosty testowe przez ingest pipeline
+        with SessionLocal() as db:
+            ingest_scan_result(
+                db,
+                ScanChunkResult(
+                    scan_run_id=created_run_id,
+                    chunk_id=uuid4(),
+                    worker_id="worker-scope-test",
+                    status="completed",
+                    started_at=now,
+                    finished_at=now,
+                    hosts=[
+                        HostResult(
+                            ip=ip_explicit,
+                            hostname="explicit.scope.local",
+                            is_up=True,
+                            services=[
+                                ServiceResult(
+                                    port=80,
+                                    protocol="tcp",
+                                    state="open",
+                                    service_name="http",
+                                    product="nginx",
+                                    http=HTTPFingerprintResult(
+                                        url=f"http://{ip_explicit}/",
+                                        scheme="http",
+                                        status_code=200,
+                                        title="Explicit Host",
+                                        technologies=["nginx"],
+                                    ),
+                                )
+                            ],
+                        ),
+                        HostResult(
+                            ip=ip_in_range,
+                            hostname="range.scope.local",
+                            is_up=True,
+                            services=[
+                                ServiceResult(
+                                    port=8080,
+                                    protocol="tcp",
+                                    state="open",
+                                    service_name="http",
+                                    product="caddy",
+                                    http=HTTPFingerprintResult(
+                                        url=f"http://{ip_in_range}:8080/",
+                                        scheme="http",
+                                        status_code=200,
+                                        title="Range Host",
+                                        technologies=["Caddy"],
+                                    ),
+                                )
+                            ],
+                        ),
+                        HostResult(
+                            ip=ip_in_group,
+                            hostname="group.scope.local",
+                            is_up=True,
+                            services=[
+                                ServiceResult(
+                                    port=443,
+                                    protocol="tcp",
+                                    state="open",
+                                    service_name="https",
+                                    product="apache",
+                                    http=HTTPFingerprintResult(
+                                        url=f"https://{ip_in_group}/",
+                                        scheme="https",
+                                        status_code=200,
+                                        title="Group Host",
+                                        technologies=[unique_tag],
+                                    ),
+                                )
+                            ],
+                        ),
+                        HostResult(
+                            ip=ip_forbidden,
+                            hostname="secret.scope.local",
+                            is_up=True,
+                            services=[
+                                ServiceResult(
+                                    port=8443,
+                                    protocol="tcp",
+                                    state="open",
+                                    service_name="https",
+                                    product="secret-srv",
+                                    http=HTTPFingerprintResult(
+                                        url=f"https://{ip_forbidden}:8443/",
+                                        scheme="https",
+                                        status_code=200,
+                                        title="Secret Host",
+                                        technologies=[forbidden_tech],
+                                        is_admin_panel=True,
+                                    ),
+                                )
+                            ],
+                        ),
+                    ],
+                ),
+                target_cidr=f"198.51.{octet}.0/24",
+                is_partial=True,
+            )
+
+        with SessionLocal() as db:
+            h_explicit = db.execute(select(Host).where(Host.ip_address == cast(ip_explicit, INET))).scalar_one()
+            h_forbidden = db.execute(select(Host).where(Host.ip_address == cast(ip_forbidden, INET))).scalar_one()
+            ev_forbidden = db.execute(
+                select(ChangeEvent).where(ChangeEvent.host_id == h_forbidden.id).limit(1)
+            ).scalar_one()
+            explicit_id = str(h_explicit.id)
+            forbidden_id = str(h_forbidden.id)
+            forbidden_ev_id = str(ev_forbidden.id)
+
+        with TestClient(app) as client:
+            admin_hdr = {"X-Dev-Role": "admin"}
+
+            # 2. Utwórz Smart Group dopasowującą wyłącznie ip_in_group
+            r_grp = client.post(
+                "/api/v1/groups",
+                headers=admin_hdr,
+                json={
+                    "name": grp_name,
+                    "filter_rules": {"technologies": [unique_tag], "statuses": ["online"]},
+                },
+            )
+            assert r_grp.status_code == 201, r_grp.text
+            grp_id = r_grp.json()["id"]
+
+            # 3. Utwórz konto admin z ograniczonym (na start pustym) zakresem
+            r_usr = client.post(
+                "/api/v1/rbac/users",
+                headers=admin_hdr,
+                json={
+                    "username": scoped_username,
+                    "email": scoped_email,
+                    "password": scoped_pass,
+                    "role_name": "admin",
+                    "scope_restricted": True,
+                },
+            )
+            assert r_usr.status_code == 201, r_usr.text
+            scoped_uid = r_usr.json()["id"]
+            assert r_usr.json()["scope_restricted"] is True
+            assert r_usr.json()["scope_summary"]["matched_hosts_count"] == 0
+
+            # 4. Logowanie JWT jako ograniczony admin -> fail-closed (0 hostów!)
+            r_login = client.post(
+                "/api/v1/auth/login",
+                json={"username": scoped_username, "password": scoped_pass},
+            )
+            assert r_login.status_code == 200, r_login.text
+            assert r_login.json()["scope_restricted"] is True
+            scoped_hdr = {"Authorization": f"Bearer {r_login.json()['access_token']}"}
+
+            r_empty_hosts = client.get("/api/v1/hosts", headers=scoped_hdr)
+            assert r_empty_hosts.status_code == 200
+            assert r_empty_hosts.json() == []
+            assert r_empty_hosts.headers.get("X-Total-Count") == "0"
+            assert client.get("/api/v1/dashboard/summary", headers=scoped_hdr).json()["kpi"]["total_hosts"] == 0
+
+            # 5. Podgląd zakresu i zapis (PATCH /rbac/users/{id}): 1 IP + zakres start-end + Smart Group
+            draft_scope = {
+                "ips": [ip_explicit],
+                "cidrs": [],
+                "ip_ranges": [ip_range_spec],
+                "group_ids": [grp_id],
+                "host_ids": [],
+            }
+            r_prev = client.post(
+                "/api/v1/rbac/users/scope-preview",
+                headers=admin_hdr,
+                json={"scope_restricted": True, "allowed_scope": draft_scope},
+            )
+            assert r_prev.status_code == 200, r_prev.text
+            assert r_prev.json()["scope_summary"]["matched_hosts_count"] == 3
+            assert set(r_prev.json()["scope_summary"]["sample_ips"]) == {ip_explicit, ip_in_range, ip_in_group}
+
+            r_patch = client.patch(
+                f"/api/v1/rbac/users/{scoped_uid}",
+                headers=admin_hdr,
+                json={"scope_restricted": True, "allowed_scope": draft_scope},
+            )
+            assert r_patch.status_code == 200, r_patch.text
+            assert r_patch.json()["scope_summary"]["matched_hosts_count"] == 3
+
+            # 6. Ten sam token JWT NATYCHMIAST widzi dokładnie 3 dozwolone hosty i ZERO danych o ip_forbidden
+            r_hosts = client.get("/api/v1/hosts?limit=500", headers=scoped_hdr)
+            assert r_hosts.status_code == 200
+            assert r_hosts.headers.get("X-Total-Count") == "3"
+            visible_ips = {h["ip_address"] for h in r_hosts.json()}
+            assert visible_ips == {ip_explicit, ip_in_range, ip_in_group}
+            assert ip_forbidden not in visible_ips
+
+            assert client.get(f"/api/v1/hosts/{explicit_id}", headers=scoped_hdr).status_code == 200
+            assert client.get(f"/api/v1/hosts/{forbidden_id}", headers=scoped_hdr).status_code == 403
+
+            # Dashboard KPI widzi tylko 3 hosty
+            dash = client.get("/api/v1/dashboard/summary", headers=scoped_hdr).json()
+            assert dash["kpi"]["total_hosts"] == 3
+
+            # Diff (/changes) nie zawiera ip_forbidden i blokuje acknowledge spoza zakresu
+            changes_ips = {ev["host_ip"] for ev in client.get("/api/v1/changes?limit=500", headers=scoped_hdr).json()}
+            assert ip_forbidden not in changes_ips
+            assert client.patch(f"/api/v1/changes/{forbidden_ev_id}/acknowledge", headers=scoped_hdr).status_code == 403
+
+            # Overrides: dozwolony host OK, host spoza zakresu -> 403
+            r_ov_ok = client.patch(
+                "/api/v1/overrides",
+                headers=scoped_hdr,
+                json={"entity_type": "host", "entity_id": explicit_id, "custom_label": "Scoped OK"},
+            )
+            assert r_ov_ok.status_code == 200
+            r_ov_forb = client.patch(
+                "/api/v1/overrides",
+                headers=scoped_hdr,
+                json={"entity_type": "host", "entity_id": forbidden_id, "custom_label": "Should fail"},
+            )
+            assert r_ov_forb.status_code == 403
+
+            # Auto-grupy nie mogą ujawnić technologii tajnego hosta!
+            auto_labels = [g["label"] for g in client.get("/api/v1/groups/auto", headers=scoped_hdr).json()["groups"]]
+            assert all(forbidden_tech not in lbl for lbl in auto_labels)
+
+            # Skanowanie: dozwolone IP OK, zakazane IP lub zbyt szeroki CIDR -> 403
+            assert (
+                client.post(
+                    "/api/v1/scans/start",
+                    headers=scoped_hdr,
+                    json={"raw_targets": [ip_explicit], "dry_run": True},
+                ).status_code
+                == 200
+            )
+            assert (
+                client.post(
+                    "/api/v1/scans/start",
+                    headers=scoped_hdr,
+                    json={"raw_targets": [ip_forbidden], "dry_run": True},
+                ).status_code
+                == 403
+            )
+            assert (
+                client.post(
+                    "/api/v1/scans/start",
+                    headers=scoped_hdr,
+                    json={"raw_targets": [f"198.51.{octet}.0/24"], "dry_run": True},
+                ).status_code
+                == 403
+            )
+
+            # Eksport JSON stanu i Dry-Run DefectDojo zawierają wyłącznie dozwolone 3 hosty
+            exp_hosts = client.get("/api/v1/scans/export?format=json", headers=scoped_hdr).json()["hosts"]
+            assert {h["ip_address"] for h in exp_hosts} == {ip_explicit, ip_in_range, ip_in_group}
+
+            dd_dry = client.post(
+                "/api/v1/integrations/defectdojo/export",
+                headers=scoped_hdr,
+                json={"dry_run": True},
+            )
+            assert dd_dry.status_code == 200
+            assert {a["ip_address"] for a in dd_dry.json()["assets"]} == {ip_explicit, ip_in_range, ip_in_group}
+
+            dd_forb = client.post(
+                "/api/v1/integrations/defectdojo/export",
+                headers=scoped_hdr,
+                json={"host_ids": [forbidden_id], "dry_run": True},
+            )
+            assert dd_forb.status_code == 403
+
+            # 7. Ochrona przed eskalacją uprawnień przez ograniczonego admina
+            assert (
+                client.patch(
+                    f"/api/v1/rbac/users/{scoped_uid}",
+                    headers=scoped_hdr,
+                    json={"scope_restricted": False},
+                ).status_code
+                == 403
+            )
+            assert (
+                client.patch(
+                    f"/api/v1/groups/{grp_id}",
+                    headers=scoped_hdr,
+                    json={"filter_rules": {"statuses": ["online"]}},
+                ).status_code
+                == 403
+            )
+    finally:
+        _cleanup()

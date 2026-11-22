@@ -1,8 +1,9 @@
-import { AlertCircle, CheckCircle2, Plus, Shield, Trash2, Users } from 'lucide-react';
+import { AlertCircle, CheckCircle2, Edit3, Lock, Plus, Shield, Trash2, Users } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { apiFetch, hasPermission } from '../api';
 import type { AuditLogItem, RoleItem, UserItem, UserRole } from '../types';
 import { formatTime } from './Badges';
+import { UserEditSheet } from './UserEditSheet';
 import { Alert, AlertDescription } from './ui/alert';
 import { Badge } from './ui/badge';
 import { Button } from './ui/button';
@@ -14,12 +15,14 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '.
 
 interface Props {
   role: UserRole;
+  currentUsername?: string | null;
+  isCurrentUserScoped?: boolean;
   onRolesChanged: () => void;
 }
 
 const ALL_PERMS = ['read', 'modify', 'add', 'delete', 'manage_integrations', 'manage_users'] as const;
 
-export function RbacAuditTab({ role, onRolesChanged }: Props) {
+export function RbacAuditTab({ role, currentUsername = null, isCurrentUserScoped = false, onRolesChanged }: Props) {
   const [roles, setRoles] = useState<RoleItem[]>([]);
   const [users, setUsers] = useState<UserItem[]>([]);
   const [auditLogs, setAuditLogs] = useState<AuditLogItem[]>([]);
@@ -37,9 +40,15 @@ export function RbacAuditTab({ role, onRolesChanged }: Props) {
   const [newEmail, setNewEmail] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [newUserRole, setNewUserRole] = useState('read_only');
+  const [openScopeAfterCreate, setOpenScopeAfterCreate] = useState(false);
   const [savingUser, setSavingUser] = useState(false);
 
+  // Edycja konta i zakresu widoczności
+  const [editingUser, setEditingUser] = useState<UserItem | null>(null);
+  const [editSheetOpen, setEditSheetOpen] = useState(false);
+
   const canManageUsers = hasPermission(role, 'manage_users');
+  const canEditAccounts = canManageUsers && !isCurrentUserScoped;
 
   async function loadAll() {
     setError(null);
@@ -116,30 +125,64 @@ export function RbacAuditTab({ role, onRolesChanged }: Props) {
 
   async function handleCreateUser(e: React.FormEvent) {
     e.preventDefault();
-    if (!canManageUsers || !newUsername.trim() || !newEmail.trim() || !newPassword) return;
+    if (!canEditAccounts || !newUsername.trim() || !newEmail.trim() || !newPassword) return;
     setSavingUser(true);
     setError(null);
     setNotice(null);
     try {
-      await apiFetch('/rbac/users', role, {
+      const created = await apiFetch<UserItem>('/rbac/users', role, {
         method: 'POST',
         body: JSON.stringify({
           username: newUsername.trim(),
           email: newEmail.trim(),
           password: newPassword,
           role_name: newUserRole,
+          scope_restricted: openScopeAfterCreate,
         }),
       });
-      setNotice(`Dodano użytkownika '${newUsername.trim()}' (rola: ${newUserRole}).`);
+      setNotice(`Dodano użytkownika '${created.username}' (rola: ${created.role}).`);
       setNewUsername('');
       setNewEmail('');
       setNewPassword('');
       await loadAll();
+      if (openScopeAfterCreate) {
+        setEditingUser(created);
+        setEditSheetOpen(true);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Błąd tworzenia użytkownika');
     } finally {
       setSavingUser(false);
     }
+  }
+
+  function renderScopeCell(u: UserItem) {
+    if (!u.scope_restricted) {
+      return (
+        <Badge variant="outline" className="font-mono text-[10px]">
+          Pełny dostęp
+        </Badge>
+      );
+    }
+    const sum = u.scope_summary;
+    const parts: string[] = [];
+    if (sum?.group_ids_count) parts.push(`${sum.group_ids_count} gr.`);
+    if (sum?.cidrs_count) parts.push(`${sum.cidrs_count} CIDR`);
+    if (sum?.ip_ranges_count) parts.push(`${sum.ip_ranges_count} zakr.`);
+    if (sum?.ips_count) parts.push(`${sum.ips_count} IP`);
+    if (sum?.host_ids_count) parts.push(`${sum.host_ids_count} host.`);
+
+    return (
+      <div className="space-y-0.5">
+        <Badge variant="default" className="font-mono text-[10px] gap-1">
+          <Lock className="h-2.5 w-2.5" />
+          {sum ? `${sum.matched_hosts_count} hostów` : 'Ograniczony'}
+        </Badge>
+        {parts.length > 0 && (
+          <div className="font-mono text-[10px] text-muted-foreground">{parts.join(' · ')}</div>
+        )}
+      </div>
+    );
   }
 
   return (
@@ -258,52 +301,65 @@ export function RbacAuditTab({ role, onRolesChanged }: Props) {
           <CardHeader className="pb-3">
             <CardTitle className="flex items-center gap-2 text-sm">
               <Users className="h-4 w-4 text-muted-foreground" />
-              Użytkownicy JWT ({users.length})
+              Użytkownicy JWT ({users.length}) &amp; Ograniczenia widoczności
             </CardTitle>
             <CardDescription>
-              Hasła haszowane algorytmem scrypt; logowanie przez POST /api/v1/auth/login.
+              Kliknij <strong>Edytuj</strong> przy koncie, aby przypisać grupy, konkretne IP, podsieci CIDR lub zakresy IP widoczne dla użytkownika.
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
             {canManageUsers ? (
               <>
-                <form onSubmit={handleCreateUser} className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 p-3 rounded-md border border-border bg-muted/30 text-xs">
-                  <Input
-                    required
-                    value={newUsername}
-                    onChange={(e) => setNewUsername(e.target.value)}
-                    placeholder="Login np. jkowalski"
-                    className="font-mono"
-                  />
-                  <Input
-                    required
-                    type="email"
-                    value={newEmail}
-                    onChange={(e) => setNewEmail(e.target.value)}
-                    placeholder="jkowalski@agh.edu.pl"
-                  />
-                  <Input
-                    required
-                    type="password"
-                    minLength={6}
-                    value={newPassword}
-                    onChange={(e) => setNewPassword(e.target.value)}
-                    placeholder="Hasło (min. 6 zn.)"
-                  />
-                  <Select value={newUserRole} onChange={(e) => setNewUserRole(e.target.value)}>
-                    {roles.map((r) => (
-                      <option key={r.name} value={r.name}>
-                        {r.name}
-                      </option>
-                    ))}
-                  </Select>
-                  <div className="sm:col-span-2">
-                    <Button type="submit" size="sm" disabled={savingUser}>
-                      <Plus className="h-3.5 w-3.5" />
-                      {savingUser ? 'Dodawanie...' : 'Dodaj użytkownika'}
-                    </Button>
-                  </div>
-                </form>
+                {canEditAccounts ? (
+                  <form onSubmit={handleCreateUser} className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 p-3 rounded-md border border-border bg-muted/30 text-xs">
+                    <Input
+                      required
+                      value={newUsername}
+                      onChange={(e) => setNewUsername(e.target.value)}
+                      placeholder="Login np. jkowalski"
+                      className="font-mono"
+                    />
+                    <Input
+                      required
+                      type="email"
+                      value={newEmail}
+                      onChange={(e) => setNewEmail(e.target.value)}
+                      placeholder="jkowalski@agh.edu.pl"
+                    />
+                    <Input
+                      required
+                      type="password"
+                      minLength={6}
+                      value={newPassword}
+                      onChange={(e) => setNewPassword(e.target.value)}
+                      placeholder="Hasło (min. 6 zn.)"
+                    />
+                    <Select value={newUserRole} onChange={(e) => setNewUserRole(e.target.value)}>
+                      {roles.map((r) => (
+                        <option key={r.name} value={r.name}>
+                          {r.name}
+                        </option>
+                      ))}
+                    </Select>
+                    <label className="sm:col-span-2 flex items-center gap-2 cursor-pointer text-muted-foreground">
+                      <Checkbox
+                        checked={openScopeAfterCreate}
+                        onCheckedChange={(v) => setOpenScopeAfterCreate(Boolean(v))}
+                      />
+                      <span>Ogranicz widoczność i otwórz od razu ustawienia zakresu po utworzeniu konta</span>
+                    </label>
+                    <div className="sm:col-span-2">
+                      <Button type="submit" size="sm" disabled={savingUser}>
+                        <Plus className="h-3.5 w-3.5" />
+                        {savingUser ? 'Dodawanie...' : 'Dodaj użytkownika'}
+                      </Button>
+                    </div>
+                  </form>
+                ) : (
+                  <p className="text-xs text-muted-foreground rounded-md border border-border bg-muted/20 px-3 py-2">
+                    To konto ma ograniczony zakres widoczności — tworzenie kont i zmiana zakresów wymaga administratora z pełnym dostępem.
+                  </p>
+                )}
 
                 <div className="rounded-md border border-border overflow-hidden">
                   <Table>
@@ -311,22 +367,47 @@ export function RbacAuditTab({ role, onRolesChanged }: Props) {
                       <TableRow>
                         <TableHead>Użytkownik</TableHead>
                         <TableHead>Rola</TableHead>
-                        <TableHead>Utworzono</TableHead>
+                        <TableHead>Widoczność</TableHead>
+                        {canEditAccounts && <TableHead className="text-right">Akcja</TableHead>}
                       </TableRow>
                     </TableHeader>
                     <TableBody>
                       {users.map((u) => (
-                        <TableRow key={u.id}>
+                        <TableRow key={u.id} className={!u.is_active ? 'opacity-60' : undefined}>
                           <TableCell>
-                            <div className="font-mono font-medium text-foreground">{u.username}</div>
+                            <div className="flex items-center gap-1.5">
+                              <span className="font-mono font-medium text-foreground">{u.username}</span>
+                              {!u.is_active && (
+                                <Badge variant="outline" className="font-mono text-[9px] px-1 py-0">
+                                  zablokowane
+                                </Badge>
+                              )}
+                            </div>
                             <div className="text-[11px] text-muted-foreground">{u.email}</div>
                           </TableCell>
                           <TableCell>
-                            <Badge variant="secondary" className="font-mono">{u.role}</Badge>
+                            <Badge variant="secondary" className="font-mono text-[10px]">
+                              {u.role}
+                            </Badge>
                           </TableCell>
-                          <TableCell className="font-mono text-[11px] text-muted-foreground">
-                            {formatTime(u.created_at)}
-                          </TableCell>
+                          <TableCell>{renderScopeCell(u)}</TableCell>
+                          {canEditAccounts && (
+                            <TableCell className="text-right">
+                              <Button
+                                type="button"
+                                variant="outline"
+                                size="sm"
+                                onClick={() => {
+                                  setEditingUser(u);
+                                  setEditSheetOpen(true);
+                                }}
+                                className="h-7 px-2.5 text-xs"
+                              >
+                                <Edit3 className="h-3 w-3" />
+                                Edytuj
+                              </Button>
+                            </TableCell>
+                          )}
                         </TableRow>
                       ))}
                     </TableBody>
@@ -387,6 +468,27 @@ export function RbacAuditTab({ role, onRolesChanged }: Props) {
           </CardContent>
         </Card>
       )}
+
+      <UserEditSheet
+        open={editSheetOpen}
+        onOpenChange={setEditSheetOpen}
+        user={editingUser}
+        role={role}
+        roles={roles}
+        currentUsername={currentUsername}
+        onSaved={(updated) => {
+          setNotice(
+            updated.scope_restricted
+              ? `Zapisano ustawienia konta '${updated.username}' (ograniczony zakres: ${updated.scope_summary?.matched_hosts_count ?? 0} odkrytych hostów).`
+              : `Zapisano ustawienia konta '${updated.username}' (pełny dostęp).`
+          );
+          loadAll();
+        }}
+        onDeleted={(_id, uname) => {
+          setNotice(`Usunięto konto użytkownika '${uname}'.`);
+          loadAll();
+        }}
+      />
     </div>
   );
 }

@@ -390,6 +390,7 @@ def start_scan_run(
     ports_override: str | None = None,
     window_minutes: int = 60,
     dry_run: bool = False,
+    scope: Any = None,
 ) -> dict[str, Any]:
     """
     Tworzy przebieg skanu, scala nakładające się zakresy CIDR, dzieli na paczki (statycznie lub adaptacyjnie),
@@ -429,8 +430,10 @@ def start_scan_run(
     if raw_targets:
         for item in raw_targets:
             typed_targets.append(detect_target_type(item))
+        if scope is not None and scope.restricted:
+            scope.assert_targets_allowed(typed_targets)
     elif group.group_type == "dynamic":
-        resolved = resolve_hosts_by_rules(db, group.filter_rules)
+        resolved = resolve_hosts_by_rules(db, group.filter_rules, scope=scope)
         for ip_str in resolved["ips"]:
             typed_targets.append(detect_target_type(ip_str))
         if not typed_targets:
@@ -442,6 +445,8 @@ def start_scan_run(
             select(Target).where(Target.group_id == group.id, Target.is_active.is_(True))
         ).scalars().all()
         for t in db_targets:
+            if scope is not None and scope.restricted and not scope.is_target_allowed(t.raw_value, t.type):
+                continue
             typed_targets.append(detect_target_type(t.raw_value))
 
     chunk_targets, total_ips = collapse_and_split_targets(typed_targets, chunk_prefix=chunk_prefix)
@@ -681,9 +686,14 @@ def cancel_scan_run(db: Session, *, scan_run_id: UUID) -> dict[str, Any]:
     }
 
 
-def reprobe_unstable_hosts(db: Session, *, window_minutes: int = 15) -> dict[str, Any]:
+def reprobe_unstable_hosts(db: Session, *, window_minutes: int = 15, scope: Any = None) -> dict[str, Any]:
     """Uruchamia celowany powtórny pomiar wyłącznie dla hostów o statusie 'unstable'."""
-    unstable_hosts = db.execute(select(Host).where(Host.status == "unstable")).scalars().all()
+    stmt = select(Host).where(Host.status == "unstable")
+    if scope is not None:
+        scope_flt = scope.sql_host_filter()
+        if scope_flt is not None:
+            stmt = stmt.where(scope_flt)
+    unstable_hosts = db.execute(stmt).scalars().all()
     if not unstable_hosts:
         return {
             "queued": False,
@@ -696,6 +706,7 @@ def reprobe_unstable_hosts(db: Session, *, window_minutes: int = 15) -> dict[str
         raw_targets=ips,
         window_minutes=window_minutes,
         dry_run=False,
+        scope=scope,
     )
     res["unstable_hosts_count"] = len(ips)
     return res

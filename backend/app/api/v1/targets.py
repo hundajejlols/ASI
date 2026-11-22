@@ -14,6 +14,7 @@ from app.db.models import Target, TargetGroup
 from app.db.session import get_db
 from app.services.audit import record_audit_event
 from app.services.chunker import detect_target_type
+from app.services.scope import resolve_principal_scope
 from app.services.seed import ensure_default_group_and_profile
 
 router = APIRouter(prefix="/targets", tags=["targets"])
@@ -125,12 +126,15 @@ def create_target_group(
 def list_targets(
     group_id: UUID | None = Query(default=None),
     db: Session = Depends(get_db),
-    _principal: Principal = Depends(require_permission("read")),
+    principal: Principal = Depends(require_permission("read")),
 ) -> list[TargetOut]:
+    scope = resolve_principal_scope(db, principal)
     stmt = select(Target).order_by(Target.created_at.desc())
     if group_id is not None:
         stmt = stmt.where(Target.group_id == group_id)
     rows = db.execute(stmt).scalars().all()
+    if scope.restricted:
+        rows = [r for r in rows if scope.is_target_allowed(r.raw_value, r.type)]
     return [
         TargetOut(
             id=r.id,
@@ -150,11 +154,13 @@ def create_target(
     db: Session = Depends(get_db),
     principal: Principal = Depends(require_permission("add")),
 ) -> TargetOut:
+    scope = resolve_principal_scope(db, principal)
     group = _resolve_group(db, payload.group_id)
     try:
         normalized, target_type = detect_target_type(payload.raw_value)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+    scope.assert_targets_allowed([(normalized, target_type)])
 
     existing = db.execute(
         select(Target).where(Target.group_id == group.id, Target.raw_value == normalized)
@@ -191,9 +197,11 @@ def update_target(
     principal: Principal = Depends(require_permission("modify")),
 ) -> TargetOut:
     """Edycja istniejącego celu (zmiana adresu/CIDR/domeny lub aktywacja/dezaktywacja)."""
+    scope = resolve_principal_scope(db, principal)
     target = db.get(Target, target_id)
     if target is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Nie znaleziono celu.")
+    scope.assert_targets_allowed([(target.raw_value, target.type)])
 
     fields = payload.model_fields_set
     if "raw_value" in fields and payload.raw_value is not None:
@@ -201,6 +209,7 @@ def update_target(
             normalized, target_type = detect_target_type(payload.raw_value)
         except ValueError as exc:
             raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+        scope.assert_targets_allowed([(normalized, target_type)])
         conflict = db.execute(
             select(Target).where(
                 Target.group_id == target.group_id,
@@ -304,11 +313,15 @@ async def import_targets(
     skipped = 0
     errors: list[str] = []
 
+    scope = resolve_principal_scope(db, principal)
     for item in raw_items:
         try:
             normalized, target_type = detect_target_type(item)
         except ValueError as exc:
             errors.append(str(exc))
+            continue
+        if scope.restricted and not scope.is_target_allowed(normalized, target_type):
+            errors.append(f"Cel '{normalized}' znajduje się poza przypisanym zakresem konta.")
             continue
         if normalized in existing_vals:
             skipped += 1
@@ -340,9 +353,11 @@ def delete_target(
     db: Session = Depends(get_db),
     principal: Principal = Depends(require_permission("delete")),
 ) -> None:
+    scope = resolve_principal_scope(db, principal)
     target = db.get(Target, target_id)
     if target is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Nie znaleziono celu.")
+    scope.assert_targets_allowed([(target.raw_value, target.type)])
     raw_val = target.raw_value
     db.delete(target)
     record_audit_event(db, principal, action="target.delete", resource_type="target", resource_id=str(target_id), details={"raw_value": raw_val})

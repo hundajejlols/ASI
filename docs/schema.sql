@@ -32,6 +32,8 @@ CREATE TABLE users (
     password_hash    TEXT NOT NULL,
     role             user_role NOT NULL DEFAULT 'read_only',
     custom_role_name VARCHAR(64) REFERENCES rbac_roles(name) ON DELETE SET NULL,
+    scope_restricted BOOLEAN NOT NULL DEFAULT FALSE,
+    allowed_scope    JSONB NOT NULL DEFAULT '{}'::jsonb,
     is_active        BOOLEAN NOT NULL DEFAULT TRUE,
     created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()

@@ -1,4 +1,4 @@
-import { AlertCircle, KeyRound, LogOut, Moon, RefreshCw, Sun } from 'lucide-react';
+import { AlertCircle, KeyRound, Lock, LogOut, Moon, RefreshCw, Sun } from 'lucide-react';
 import { useCallback, useEffect, useState } from 'react';
 import { API_BASE, apiFetch, setAuthToken, syncDynamicRoles } from './api';
 import { ChangesTab } from './components/ChangesTab';
@@ -86,6 +86,7 @@ export default function App() {
   }, [theme]);
 
   const effectiveRole = session ? session.role : role;
+  const authKey = session ? `jwt:${session.username}:${session.token.slice(-10)}` : `demo:${role}`;
 
   const refreshRoles = useCallback(async () => {
     try {
@@ -96,7 +97,7 @@ export default function App() {
     } catch {
       // keep default roles
     }
-  }, [effectiveRole]);
+  }, [effectiveRole, authKey]);
 
   const refreshCoreData = useCallback(async () => {
     try {
@@ -114,7 +115,7 @@ export default function App() {
     } catch (e) {
       setApiError(e instanceof Error ? e.message : 'Brak połączenia z Backend API');
     }
-  }, [effectiveRole]);
+  }, [effectiveRole, authKey]);
 
   useEffect(() => {
     refreshRoles();
@@ -142,6 +143,8 @@ export default function App() {
         username: data.username,
         role: data.role,
         permissions: data.permissions || [],
+        scope_restricted: Boolean(data.scope_restricted),
+        scope_summary: data.scope_summary ?? null,
       });
       setRole(data.role);
       setShowLogin(false);
@@ -224,6 +227,16 @@ export default function App() {
                 <Badge variant="default" className="font-mono text-[11px]">
                   JWT: {session.username} ({session.role})
                 </Badge>
+                {session.scope_restricted && (
+                  <Badge
+                    variant="outline"
+                    className="font-mono text-[10px] gap-1"
+                    title="Konto ma ograniczony zakres widoczności zasobów"
+                  >
+                    <Lock className="h-2.5 w-2.5" />
+                    Zakres: {session.scope_summary?.matched_hosts_count ?? 0} hostów
+                  </Badge>
+                )}
                 <Button variant="outline" size="icon" onClick={handleLogout} title="Wyloguj JWT (wróć do przełącznika demo)">
                   <LogOut className="h-3.5 w-3.5" />
                 </Button>
@@ -344,58 +357,65 @@ export default function App() {
           </Alert>
         )}
 
-        <TabsContent value="dashboard" className="mt-0">
-          <DashboardTab
-            role={effectiveRole}
-            hosts={hosts}
-            changes={changes}
-            summary={summary}
-            onRefresh={refreshCoreData}
-            onOpenGroupSearch={handleOpenGroupSearch}
-          />
-        </TabsContent>
-        <TabsContent value="hosts" className="mt-0">
-          <HostsTab
-            role={effectiveRole}
-            hosts={hosts}
-            onRefresh={refreshCoreData}
-            onCreateSignature={handleCreateSignatureFromHost}
-          />
-        </TabsContent>
-        <TabsContent value="groups" className="mt-0">
-          <GroupsTab
-            role={effectiveRole}
-            initialSearch={groupSearchQuery}
-            onInitialSearchConsumed={handleGroupSearchConsumed}
-            onRefreshAll={refreshCoreData}
-            onExportGroupToDefectDojo={handleExportGroupToDefectDojo}
-          />
-        </TabsContent>
-        <TabsContent value="changes" className="mt-0">
-          <ChangesTab role={effectiveRole} changes={changes} onRefresh={refreshCoreData} />
-        </TabsContent>
-        <TabsContent value="targets" className="mt-0">
-          <TargetsScansTab role={effectiveRole} onRefreshAll={refreshCoreData} />
-        </TabsContent>
-        <TabsContent value="signatures" className="mt-0">
-          <SignaturesTab
-            role={effectiveRole}
-            initialDraft={signatureDraft}
-            onDraftConsumed={handleSignatureDraftConsumed}
-          />
-        </TabsContent>
-        <TabsContent value="defectdojo" className="mt-0">
-          <DefectDojoTab
-            role={effectiveRole}
-            hosts={hosts}
-            preselectedHostIds={ddPreselect?.hostIds ?? null}
-            preselectedGroupLabel={ddPreselect?.label ?? null}
-            onPreselectionConsumed={handleDdPreselectConsumed}
-          />
-        </TabsContent>
-        <TabsContent value="rbac" className="mt-0">
-          <RbacAuditTab role={effectiveRole} onRolesChanged={refreshRoles} />
-        </TabsContent>
+        <div key={authKey}>
+          <TabsContent value="dashboard" className="mt-0">
+            <DashboardTab
+              role={effectiveRole}
+              hosts={hosts}
+              changes={changes}
+              summary={summary}
+              onRefresh={refreshCoreData}
+              onOpenGroupSearch={handleOpenGroupSearch}
+            />
+          </TabsContent>
+          <TabsContent value="hosts" className="mt-0">
+            <HostsTab
+              role={effectiveRole}
+              hosts={hosts}
+              onRefresh={refreshCoreData}
+              onCreateSignature={handleCreateSignatureFromHost}
+            />
+          </TabsContent>
+          <TabsContent value="groups" className="mt-0">
+            <GroupsTab
+              role={effectiveRole}
+              initialSearch={groupSearchQuery}
+              onInitialSearchConsumed={handleGroupSearchConsumed}
+              onRefreshAll={refreshCoreData}
+              onExportGroupToDefectDojo={handleExportGroupToDefectDojo}
+            />
+          </TabsContent>
+          <TabsContent value="changes" className="mt-0">
+            <ChangesTab role={effectiveRole} changes={changes} onRefresh={refreshCoreData} />
+          </TabsContent>
+          <TabsContent value="targets" className="mt-0">
+            <TargetsScansTab role={effectiveRole} onRefreshAll={refreshCoreData} />
+          </TabsContent>
+          <TabsContent value="signatures" className="mt-0">
+            <SignaturesTab
+              role={effectiveRole}
+              initialDraft={signatureDraft}
+              onDraftConsumed={handleSignatureDraftConsumed}
+            />
+          </TabsContent>
+          <TabsContent value="defectdojo" className="mt-0">
+            <DefectDojoTab
+              role={effectiveRole}
+              hosts={hosts}
+              preselectedHostIds={ddPreselect?.hostIds ?? null}
+              preselectedGroupLabel={ddPreselect?.label ?? null}
+              onPreselectionConsumed={handleDdPreselectConsumed}
+            />
+          </TabsContent>
+          <TabsContent value="rbac" className="mt-0">
+            <RbacAuditTab
+              role={effectiveRole}
+              currentUsername={session?.username ?? null}
+              isCurrentUserScoped={Boolean(session?.scope_restricted)}
+              onRolesChanged={refreshRoles}
+            />
+          </TabsContent>
+        </div>
       </main>
     </Tabs>
   );

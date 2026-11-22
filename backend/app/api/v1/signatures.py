@@ -16,6 +16,7 @@ from app.db.models import CustomSignature, Host, Service
 from app.db.session import get_db
 from app.services.audit import record_audit_event
 from app.services.queries import fetch_latest_http_fingerprints
+from app.services.scope import resolve_principal_scope
 
 router = APIRouter(prefix="/signatures", tags=["signatures"])
 
@@ -613,18 +614,24 @@ def export_signatures(
 @router.get("/observed-artifacts")
 def get_observed_artifacts(
     db: Session = Depends(get_db),
-    _principal: Principal = Depends(require_permission("read")),
+    principal: Principal = Depends(require_permission("read")),
 ) -> dict[str, Any]:
     """
     Zwraca unikalne nagłówki HTTP, ciasteczka oraz hashe Favicon MMH3 zaobserwowane dotąd w bazie —
     używane jako podpowiedzi 1-klik w kreatorze sygnatur.
     """
-    svc_rows = db.execute(
+    scope = resolve_principal_scope(db, principal)
+    scope_flt = scope.sql_host_filter()
+
+    svc_stmt = (
         select(Service, Host.ip_address)
         .join(Host, Host.id == Service.host_id)
         .where(Service.state == "open", Host.status.notin_(["offline", "archived"]))
         .limit(500)
-    ).all()
+    )
+    if scope_flt is not None:
+        svc_stmt = svc_stmt.where(scope_flt)
+    svc_rows = db.execute(svc_stmt).all()
 
     svc_ids = [s.id for s, _ in svc_rows]
     latest_fps = fetch_latest_http_fingerprints(db, svc_ids)
@@ -723,7 +730,7 @@ async def import_signatures_file(
 def test_signature(
     payload: SignatureTestRequest,
     db: Session = Depends(get_db),
-    _principal: Principal = Depends(require_permission("read")),
+    principal: Principal = Depends(require_permission("read")),
 ) -> dict[str, Any]:
     """
     Bezpieczny pasywny tester sygnatury (bez zapytań sieciowych):
@@ -810,12 +817,17 @@ def test_signature(
     db_test: dict[str, Any] | None = None
     if payload.test_against_db:
         if payload.match_type in ("header", "cookie", "favicon_hash"):
-            svc_rows = db.execute(
+            scope = resolve_principal_scope(db, principal)
+            scope_flt = scope.sql_host_filter()
+            svc_stmt = (
                 select(Service, Host)
                 .join(Host, Host.id == Service.host_id)
                 .where(Service.state == "open", Host.status.notin_(["offline", "archived"]))
                 .limit(500)
-            ).all()
+            )
+            if scope_flt is not None:
+                svc_stmt = svc_stmt.where(scope_flt)
+            svc_rows = db.execute(svc_stmt).all()
             svc_ids = [s.id for s, _ in svc_rows]
             latest_fps = fetch_latest_http_fingerprints(db, svc_ids)
 

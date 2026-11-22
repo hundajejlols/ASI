@@ -4,13 +4,15 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.crypto import AAD_INTEGRATION_TOKEN, encrypt_field
 from app.core.security import Principal, require_permission
-from app.db.models import Integration
+from app.db.models import Host, Integration
 from app.db.session import get_db
 from app.services.audit import record_audit_event
+from app.services.scope import resolve_principal_scope
 from app.services.defectdojo import (
     DEFAULT_ENGAGEMENT_NAME,
     DEFAULT_MAX_EXPORT_ASSETS,
@@ -191,6 +193,12 @@ def export_defectdojo(
     w modelu 1 IP = 1 Asset (Product).
     Dostępne dla ról: admin, add_delete_modify, modify_read.
     """
+    scope = resolve_principal_scope(db, principal)
+    if scope.restricted and payload.host_ids:
+        req_hosts = db.execute(select(Host).where(Host.id.in_(payload.host_ids))).scalars().all()
+        for h in req_hosts:
+            scope.assert_host_allowed(h)
+
     try:
         res = export_to_defectdojo(
             db,
@@ -200,6 +208,7 @@ def export_defectdojo(
             close_old_findings=payload.close_old_findings,
             dry_run=payload.dry_run,
             max_assets=payload.max_assets,
+            scope=scope,
         )
         if not payload.dry_run:
             stats = res.get("stats") or {}
