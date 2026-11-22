@@ -7,11 +7,12 @@ import {
   ChevronUp,
   Edit3,
   Lock,
+  Plus,
   Search,
 } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { apiFetch, apiFetchPaginated, hasPermission } from '../api';
-import type { HostDetail, HostSummary, ServiceOut, Severity, UserRole } from '../types';
+import type { HostDetail, HostSummary, ServiceOut, Severity, SignatureDraft, UserRole } from '../types';
 import { formatTime, HostStatusBadge, SeverityBadge } from './Badges';
 import { Alert, AlertDescription } from './ui/alert';
 import { Badge } from './ui/badge';
@@ -30,11 +31,12 @@ interface Props {
   role: UserRole;
   hosts: HostSummary[];
   onRefresh: () => void;
+  onCreateSignature?: (draft: SignatureDraft) => void;
 }
 
 const PAGE_SIZE = 50;
 
-export function HostsTab({ role, hosts: initialHosts, onRefresh }: Props) {
+export function HostsTab({ role, hosts: initialHosts, onRefresh, onCreateSignature }: Props) {
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState<string>('all');
   const [page, setPage] = useState(0);
@@ -67,6 +69,7 @@ export function HostsTab({ role, hosts: initialHosts, onRefresh }: Props) {
   const [svcFp, setSvcFp] = useState(false);
   const [savingSvcOv, setSavingSvcOv] = useState(false);
 
+  const canAdd = hasPermission(role, 'add');
   const canModify = hasPermission(role, 'modify');
 
   // Serwerowe filtrowanie i paginacja (skalowalne >10 000 hostów)
@@ -543,9 +546,33 @@ export function HostsTab({ role, hosts: initialHosts, onRefresh }: Props) {
                               )}
 
                               {fp.favicon_mmh3_hash && (
-                                <div className="font-mono text-foreground">
-                                  <span className="font-sans text-muted-foreground">Favicon MMH3:</span>{' '}
-                                  {fp.favicon_mmh3_hash}
+                                <div className="flex flex-wrap items-center justify-between gap-2 font-mono text-foreground">
+                                  <div>
+                                    <span className="font-sans text-muted-foreground">Favicon MMH3:</span>{' '}
+                                    {fp.favicon_mmh3_hash}
+                                  </div>
+                                  {canAdd && onCreateSignature && (
+                                    <Button
+                                      type="button"
+                                      size="sm"
+                                      variant="outline"
+                                      className="h-6 px-2 text-[10px]"
+                                      onClick={() => {
+                                        const hash = fp.favicon_mmh3_hash || '';
+                                        setSelectedHost(null);
+                                        onCreateSignature({
+                                          name: `Favicon ${selectedHost.hostname || selectedHost.ip_address} (${hash})`,
+                                          description: `Wykrywa usługę po hashu Favicon MMH3 zaobserwowanym na ${selectedHost.ip_address}:${svc.port}`,
+                                          severity: 'info',
+                                          match_type: 'favicon_hash',
+                                          favicon_hash: hash,
+                                        });
+                                      }}
+                                    >
+                                      <Plus className="h-3 w-3" />
+                                      Sygnatura
+                                    </Button>
+                                  )}
                                 </div>
                               )}
 
@@ -590,9 +617,99 @@ export function HostsTab({ role, hosts: initialHosts, onRefresh }: Props) {
                                   )}
                                 </Button>
                                 {showHdr && (
-                                  <pre className="mt-2 p-3 rounded-md bg-muted border border-border text-[11px] font-mono text-foreground overflow-x-auto">
-                                    {JSON.stringify({ headers: fp.headers || {}, cookies: fp.cookies || [] }, null, 2)}
-                                  </pre>
+                                  <div className="mt-2 space-y-2.5 p-3 rounded-md bg-muted border border-border text-[11px]">
+                                    {(fp.cookies || []).length > 0 && (
+                                      <div className="space-y-1">
+                                        <div className="text-[10px] uppercase tracking-wider text-muted-foreground">
+                                          Ciasteczka ({fp.cookies.length})
+                                        </div>
+                                        <div className="flex flex-wrap gap-1.5">
+                                          {fp.cookies.map((ck) => (
+                                            <span
+                                              key={ck}
+                                              className="inline-flex items-center gap-1 rounded border border-border bg-background px-2 py-0.5 font-mono text-foreground"
+                                            >
+                                              <span>{ck}</span>
+                                              {canAdd && onCreateSignature && (
+                                                <button
+                                                  type="button"
+                                                  title={`Utwórz sygnaturę z ciasteczka ${ck}`}
+                                                  onClick={() => {
+                                                    setSelectedHost(null);
+                                                    onCreateSignature({
+                                                      name: `Cookie: ${ck}`,
+                                                      description: `Wykrywa ciasteczko ${ck} zaobserwowane na ${selectedHost.ip_address}:${svc.port}`,
+                                                      severity: 'info',
+                                                      match_type: 'cookie',
+                                                      cookie_name: ck,
+                                                    });
+                                                  }}
+                                                  className="ml-0.5 text-muted-foreground hover:text-foreground"
+                                                >
+                                                  <Plus className="h-3 w-3" />
+                                                </button>
+                                              )}
+                                            </span>
+                                          ))}
+                                        </div>
+                                      </div>
+                                    )}
+
+                                    {Object.keys(fp.headers || {}).length > 0 && (
+                                      <div className="space-y-1">
+                                        <div className="text-[10px] uppercase tracking-wider text-muted-foreground">
+                                          Nagłówki HTTP ({Object.keys(fp.headers || {}).length})
+                                        </div>
+                                        <div className="divide-y divide-border/70 rounded border border-border bg-background">
+                                          {Object.entries(fp.headers || {}).map(([hk, hv]) => (
+                                            <div
+                                              key={hk}
+                                              className="flex items-center justify-between gap-2 px-2 py-1 font-mono"
+                                            >
+                                              <div className="min-w-0 break-all">
+                                                <span className="font-semibold text-foreground">{hk}:</span>{' '}
+                                                <span className="text-muted-foreground">{hv}</span>
+                                              </div>
+                                              {canAdd && onCreateSignature && (
+                                                <Button
+                                                  type="button"
+                                                  size="sm"
+                                                  variant="ghost"
+                                                  className="h-6 px-1.5 text-[10px] shrink-0"
+                                                  title={`Utwórz sygnaturę z nagłówka ${hk}`}
+                                                  onClick={() => {
+                                                    setSelectedHost(null);
+                                                    onCreateSignature({
+                                                      name: `Header: ${hk}`,
+                                                      description: `Wykrywa nagłówek ${hk} zaobserwowany na ${selectedHost.ip_address}:${svc.port}`,
+                                                      severity: 'info',
+                                                      match_type: 'header',
+                                                      header_name: hk,
+                                                      header_value: hv,
+                                                      header_op: 'contains',
+                                                      sample_hint: `${hk}: ${hv}`,
+                                                    });
+                                                  }}
+                                                >
+                                                  <Plus className="h-3 w-3" />
+                                                  Sygnatura
+                                                </Button>
+                                              )}
+                                            </div>
+                                          ))}
+                                        </div>
+                                      </div>
+                                    )}
+
+                                    <details>
+                                      <summary className="cursor-pointer font-mono text-[10px] text-muted-foreground hover:text-foreground">
+                                        Surowy JSON nagłówków i ciasteczek
+                                      </summary>
+                                      <pre className="mt-1.5 p-2 rounded bg-background border border-border text-[10px] font-mono text-foreground overflow-x-auto">
+                                        {JSON.stringify({ headers: fp.headers || {}, cookies: fp.cookies || [] }, null, 2)}
+                                      </pre>
+                                    </details>
+                                  </div>
                                 )}
                               </div>
                             </div>

@@ -125,6 +125,8 @@ class TargetGroup(Base):
     name: Mapped[str] = mapped_column(String(128), unique=True, nullable=False)
     description: Mapped[str | None] = mapped_column(Text)
     environment: Mapped[str] = mapped_column(String(32), default="prod", nullable=False)
+    group_type: Mapped[str] = mapped_column(String(16), default="static", nullable=False)
+    filter_rules: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     targets: Mapped[list["Target"]] = relationship("Target", back_populates="group", cascade="all, delete-orphan")
@@ -173,6 +175,8 @@ class ScanSchedule(Base):
     is_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
+    target_group: Mapped[TargetGroup | None] = relationship("TargetGroup")
+
 
 class ScanRun(Base):
     __tablename__ = "scan_runs"
@@ -182,6 +186,7 @@ class ScanRun(Base):
     target_group_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), ForeignKey("target_groups.id"), nullable=False)
     profile_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), ForeignKey("scan_profiles.id"), nullable=False)
     status: Mapped[str] = mapped_column(scan_run_status_enum, nullable=False, default="queued")
+    scanned_ports: Mapped[str | None] = mapped_column(Text)
     window_deadline_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     total_chunks: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     completed_chunks: Mapped[int] = mapped_column(Integer, nullable=False, default=0)

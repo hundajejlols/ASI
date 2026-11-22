@@ -5,7 +5,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 from sqlalchemy import desc, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from app.core.security import Principal, require_permission
 from app.db.models import ScanProfile, ScanSchedule, TargetGroup
@@ -47,6 +47,7 @@ class ScheduleCreateRequest(BaseModel):
 
 class ScheduleUpdateRequest(BaseModel):
     name: str | None = Field(default=None, min_length=2, max_length=128)
+    target_group_id: UUID | None = None
     cron_expression: str | None = None
     window_start: str | None = None
     window_end: str | None = None
@@ -59,6 +60,8 @@ class ScheduleOut(BaseModel):
     id: UUID
     name: str
     target_group_id: UUID
+    target_group_name: str | None = None
+    target_group_type: str | None = None
     profile_id: UUID
     cron_expression: str
     window_start: str
@@ -75,10 +78,13 @@ def _to_out(sched: ScanSchedule) -> ScheduleOut:
     now_local = datetime.now(timezone.utc).astimezone(_resolve_tz(sched.timezone))
     in_win = is_within_window(now_local, sched.window_start_utc, sched.window_end_utc)
     rem = remaining_window_minutes(now_local, sched.window_start_utc, sched.window_end_utc) if in_win else None
+    grp = sched.target_group
     return ScheduleOut(
         id=sched.id,
         name=sched.name,
         target_group_id=sched.target_group_id,
+        target_group_name=grp.name if grp else None,
+        target_group_type=grp.group_type if grp else None,
         profile_id=sched.profile_id,
         cron_expression=sched.cron_expression,
         window_start=sched.window_start_utc.strftime("%H:%M"),
@@ -97,7 +103,11 @@ def list_schedules(
     db: Session = Depends(get_db),
     _principal: Principal = Depends(require_permission("read")),
 ) -> list[ScheduleOut]:
-    rows = db.execute(select(ScanSchedule).order_by(desc(ScanSchedule.created_at))).scalars().all()
+    rows = db.execute(
+        select(ScanSchedule)
+        .options(selectinload(ScanSchedule.target_group))
+        .order_by(desc(ScanSchedule.created_at))
+    ).scalars().all()
     return [_to_out(r) for r in rows]
 
 
@@ -180,6 +190,11 @@ def update_schedule(
                     detail=f"Harmonogram o nazwie '{clean_name}' już istnieje.",
                 )
             sched.name = clean_name
+        if "target_group_id" in fields and payload.target_group_id is not None:
+            new_grp = db.get(TargetGroup, payload.target_group_id)
+            if new_grp is None:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Nie znaleziono grupy celów.")
+            sched.target_group_id = new_grp.id
         if "cron_expression" in fields and payload.cron_expression is not None:
             sched.cron_expression = validate_cron_expression(payload.cron_expression)
         if "window_start" in fields and payload.window_start is not None:

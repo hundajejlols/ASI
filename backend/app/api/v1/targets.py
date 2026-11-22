@@ -50,6 +50,7 @@ class TargetGroupOut(BaseModel):
     name: str
     description: str | None = None
     environment: str
+    group_type: str = "static"
     created_at: datetime
 
 
@@ -89,6 +90,7 @@ def list_target_groups(
             name=g.name,
             description=g.description,
             environment=g.environment,
+            group_type=g.group_type,
             created_at=g.created_at,
         )
         for g in rows

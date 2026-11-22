@@ -107,10 +107,15 @@ export function ChangesTimelineChart({ role, initialTimeline, dayStats, nightSta
         if (cancelled || !res.changes_timeline?.length) return;
         const newLen = res.changes_timeline.length;
         setFullTimeline((prev) => {
-          const delta = newLen - prev.length;
-          if (delta > 0) {
-            setViewStart((vs) => vs + delta);
-            setViewEnd((ve) => ve + delta);
+          if (prev.length === 0) {
+            setViewStart(Math.max(0, newLen - 14));
+            setViewEnd(newLen);
+          } else {
+            const delta = newLen - prev.length;
+            if (delta > 0) {
+              setViewStart((vs) => Math.min(newLen - 3, vs + delta));
+              setViewEnd((ve) => Math.min(newLen, ve + delta));
+            }
           }
           return res.changes_timeline;
         });

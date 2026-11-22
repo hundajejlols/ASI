@@ -2,21 +2,35 @@ import {
   AlertCircle,
   CalendarClock,
   CheckCircle2,
+  ChevronDown,
+  ChevronUp,
   Clock,
   Download,
   Edit3,
+  Layers,
   Play,
   Plus,
   RefreshCw,
   RotateCcw,
+  Search,
+  SlidersHorizontal,
   Trash2,
   Upload,
   X,
   XCircle,
 } from 'lucide-react';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { apiFetch, downloadExport, hasPermission } from '../api';
-import type { ScanRunInfo, ScheduleItem, TargetItem, UserRole } from '../types';
+import type {
+  AutoGroupItem,
+  AutoGroupsResponse,
+  GroupFilterRules,
+  SavedGroupItem,
+  ScanRunInfo,
+  ScheduleItem,
+  TargetItem,
+  UserRole,
+} from '../types';
 import { formatTime } from './Badges';
 import { Alert, AlertDescription } from './ui/alert';
 import { Badge } from './ui/badge';
@@ -42,6 +56,12 @@ interface ScanProfileOption {
 
 export function TargetsScansTab({ role, onRefreshAll }: Props) {
   const [targets, setTargets] = useState<TargetItem[]>([]);
+  const [groups, setGroups] = useState<SavedGroupItem[]>([]);
+  const [autoGroups, setAutoGroups] = useState<AutoGroupItem[]>([]);
+  const [showGroupPicker, setShowGroupPicker] = useState(false);
+  const [groupPickerSearch, setGroupPickerSearch] = useState('');
+  const [addingGroupKey, setAddingGroupKey] = useState<string | null>(null);
+  const [excludedTargetIds, setExcludedTargetIds] = useState<Set<string>>(() => new Set());
   const [profiles, setProfiles] = useState<ScanProfileOption[]>([]);
   const [selectedProfileId, setSelectedProfileId] = useState<string>('');
   const [newTarget, setNewTarget] = useState('');
@@ -52,12 +72,15 @@ export function TargetsScansTab({ role, onRefreshAll }: Props) {
   const [ports, setPorts] = useState('80,443,8080,8443,22');
   const [customTargetsText, setCustomTargetsText] = useState('');
   const [dryRun, setDryRun] = useState(true);
+  const [showChunkerSettings, setShowChunkerSettings] = useState(false);
+  const [showRawScanJson, setShowRawScanJson] = useState(false);
 
   const [scanResult, setScanResult] = useState<Record<string, unknown> | null>(null);
   const [scanRuns, setScanRuns] = useState<ScanRunInfo[]>([]);
   const [schedules, setSchedules] = useState<ScheduleItem[]>([]);
   const [editingSchedId, setEditingSchedId] = useState<string | null>(null);
   const [schedName, setSchedName] = useState('');
+  const [schedGroupId, setSchedGroupId] = useState('');
   const [schedCron, setSchedCron] = useState('0 22 * * *');
   const [schedWinStart, setSchedWinStart] = useState('22:00');
   const [schedWinEnd, setSchedWinEnd] = useState('06:00');
@@ -137,11 +160,25 @@ export function TargetsScansTab({ role, onRefreshAll }: Props) {
     }
   }
 
+  async function loadGroups() {
+    try {
+      const [savedRes, autoRes] = await Promise.all([
+        apiFetch<SavedGroupItem[]>('/groups?include_static=true', role),
+        apiFetch<AutoGroupsResponse>('/groups/auto', role).catch(() => null),
+      ]);
+      setGroups(savedRes);
+      setAutoGroups(autoRes?.groups || []);
+    } catch {
+      // ignore background load errors
+    }
+  }
+
   useEffect(() => {
     loadTargets();
     loadScanRuns();
     loadSchedules();
     loadProfiles();
+    loadGroups();
   }, [role]);
 
   useEffect(() => {
@@ -188,6 +225,12 @@ export function TargetsScansTab({ role, onRefreshAll }: Props) {
     setError(null);
     try {
       await apiFetch(`/targets/${id}`, role, { method: 'DELETE' });
+      setExcludedTargetIds((prev) => {
+        if (!prev.has(id)) return prev;
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      });
       await loadTargets();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Błąd usuwania celu');
@@ -225,17 +268,128 @@ export function TargetsScansTab({ role, onRefreshAll }: Props) {
     }
   }
 
-  async function handleStartScan(e: React.FormEvent) {
-    e.preventDefault();
+  type GroupPickerEntry = {
+    key: string;
+    kind: 'smart' | 'auto';
+    label: string;
+    count: number;
+    sampleIps: string[];
+    groupId?: string;
+    filterRules?: GroupFilterRules;
+  };
+
+  const pickerGroups = useMemo<GroupPickerEntry[]>(() => {
+    const q = groupPickerSearch.trim().toLowerCase();
+    const list: GroupPickerEntry[] = [
+      ...groups
+        .filter((g) => g.group_type === 'dynamic')
+        .map((g) => ({
+          key: `smart:${g.id}`,
+          kind: 'smart' as const,
+          label: g.name,
+          count: g.member_count,
+          sampleIps: g.sample_ips,
+          groupId: g.id,
+        })),
+      ...autoGroups.map((ag) => ({
+        key: `auto:${ag.key}`,
+        kind: 'auto' as const,
+        label: ag.label,
+        count: ag.host_count,
+        sampleIps: ag.sample_ips,
+        filterRules: ag.filter_rules,
+      })),
+    ];
+    if (!q) return list;
+    return list.filter(
+      (g) => g.label.toLowerCase().includes(q) || g.sampleIps.some((ip) => ip.includes(q))
+    );
+  }, [groups, autoGroups, groupPickerSearch]);
+
+  async function resolvePickerIps(entry: GroupPickerEntry): Promise<string[]> {
+    if (entry.groupId) {
+      const res = await apiFetch<{ ips: string[] }>(`/groups/${entry.groupId}/members`, role);
+      return res.ips || [];
+    }
+    if (entry.filterRules) {
+      const res = await apiFetch<{ ips: string[] }>('/groups/preview', role, {
+        method: 'POST',
+        body: JSON.stringify(entry.filterRules),
+      });
+      return res.ips || [];
+    }
+    return entry.sampleIps;
+  }
+
+  async function handleAddGroupToScan(entry: GroupPickerEntry) {
     if (!canAdd) return;
-    setBusy(true);
+    setAddingGroupKey(`scan:${entry.key}`);
     setError(null);
-    setScanResult(null);
+    setImportResult(null);
     try {
-      const rawTargets = customTargetsText
+      const ips = await resolvePickerIps(entry);
+      if (ips.length === 0) {
+        setError(`Grupa "${entry.label}" nie zawiera obecnie żadnych hostów.`);
+        return;
+      }
+      const existing = customTargetsText
         .split(/[\n,]/)
         .map((s) => s.trim())
         .filter(Boolean);
+      const merged = Array.from(new Set([...existing, ...ips]));
+      setCustomTargetsText(merged.join(', '));
+      setImportResult(
+        `Dodano grupę "${entry.label}" (${ips.length} IP) do tego skanu — zostanie połączona z zaznaczonymi zapisanymi celami.`
+      );
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Błąd pobierania hostów z grupy');
+    } finally {
+      setAddingGroupKey(null);
+    }
+  }
+
+  async function handleAddGroupToTargets(entry: GroupPickerEntry) {
+    if (!canAdd) return;
+    setAddingGroupKey(`targets:${entry.key}`);
+    setError(null);
+    setImportResult(null);
+    try {
+      const ips = await resolvePickerIps(entry);
+      if (ips.length === 0) {
+        setError(`Grupa "${entry.label}" nie zawiera obecnie żadnych hostów.`);
+        return;
+      }
+      const fd = new FormData();
+      const file = new File([JSON.stringify(ips)], 'group_targets.json', { type: 'application/json' });
+      fd.append('file', file);
+      const res = await apiFetch<{ added: number; skipped_duplicates: number; errors: string[] }>(
+        '/targets/import',
+        role,
+        { method: 'POST', body: fd }
+      );
+      setImportResult(
+        `Dodano hosty z grupy "${entry.label}" do tabeli Cele: nowych ${res.added}, już istniejących ${res.skipped_duplicates}.`
+      );
+      await loadTargets();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Błąd dodawania grupy do celów');
+    } finally {
+      setAddingGroupKey(null);
+    }
+  }
+
+  async function handleStartScan(e: React.FormEvent) {
+    e.preventDefault();
+    if (!canAdd) return;
+    if (combinedTargets.length === 0) {
+      setError('Zaznacz przynajmniej jeden zapisany cel lub dodaj cele z grupy / ad-hoc.');
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    setScanResult(null);
+    setShowRawScanJson(false);
+    try {
       const body: Record<string, unknown> = {
         chunk_cidr_prefix: adaptiveChunking ? null : chunkPrefix,
         adaptive_chunking: adaptiveChunking,
@@ -249,8 +403,9 @@ export function TargetsScansTab({ role, onRefreshAll }: Props) {
       if (ports.trim()) {
         body.ports = ports.trim();
       }
-      if (rawTargets.length > 0) {
-        body.raw_targets = rawTargets;
+      // Gdy dodano cele z grup/ad-hoc lub odznaczono część zapisanych celów, łączymy zaznaczone zapisane + dodatkowe
+      if (adHocTargets.length > 0 || includedSavedTargets.length < targets.length) {
+        body.raw_targets = combinedTargets;
       }
       const res = await apiFetch<Record<string, unknown>>('/scans/start', role, {
         method: 'POST',
@@ -336,6 +491,7 @@ export function TargetsScansTab({ role, onRefreshAll }: Props) {
   function startEditSchedule(s: ScheduleItem) {
     setEditingSchedId(s.id);
     setSchedName(s.name);
+    setSchedGroupId(s.target_group_id || '');
     setSchedCron(s.cron_expression);
     setSchedWinStart(s.window_start);
     setSchedWinEnd(s.window_end);
@@ -345,6 +501,7 @@ export function TargetsScansTab({ role, onRefreshAll }: Props) {
   function resetScheduleForm() {
     setEditingSchedId(null);
     setSchedName('');
+    setSchedGroupId('');
     setSchedCron('0 22 * * *');
     setSchedWinStart('22:00');
     setSchedWinEnd('06:00');
@@ -359,7 +516,7 @@ export function TargetsScansTab({ role, onRefreshAll }: Props) {
     setError(null);
     setImportResult(null);
     try {
-      const payload = {
+      const payload: Record<string, unknown> = {
         name: schedName.trim(),
         cron_expression: schedCron.trim(),
         window_start: schedWinStart,
@@ -367,6 +524,9 @@ export function TargetsScansTab({ role, onRefreshAll }: Props) {
         timezone: 'Europe/Warsaw',
         missed_scans_threshold: schedThreshold,
       };
+      if (schedGroupId) {
+        payload.target_group_id = schedGroupId;
+      }
       if (editingSchedId) {
         await apiFetch(`/schedules/${editingSchedId}`, role, {
           method: 'PATCH',
@@ -508,6 +668,91 @@ export function TargetsScansTab({ role, onRefreshAll }: Props) {
     }
   }
 
+  const adHocTargets = useMemo(
+    () =>
+      customTargetsText
+        .split(/[\n,]/)
+        .map((s) => s.trim())
+        .filter(Boolean),
+    [customTargetsText]
+  );
+
+  const includedSavedTargets = useMemo(
+    () => targets.filter((t) => !excludedTargetIds.has(t.id)),
+    [targets, excludedTargetIds]
+  );
+
+  const combinedTargets = useMemo(
+    () => Array.from(new Set([...includedSavedTargets.map((t) => t.raw_value), ...adHocTargets])),
+    [includedSavedTargets, adHocTargets]
+  );
+
+  const allSavedIncluded = targets.length > 0 && includedSavedTargets.length === targets.length;
+
+  function toggleSavedTarget(id: string) {
+    setExcludedTargetIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
+  }
+
+  function toggleAllSavedTargets() {
+    if (allSavedIncluded) {
+      setExcludedTargetIds(new Set(targets.map((t) => t.id)));
+    } else {
+      setExcludedTargetIds(new Set());
+    }
+  }
+
+  const scanScope = useMemo(() => {
+    const savedCount = includedSavedTargets.length;
+    const extraCount = adHocTargets.length;
+    const totalCount = combinedTargets.length;
+
+    if (totalCount === 0) {
+      return {
+        hasExtras: false,
+        badge: 'Brak wybranych celów',
+        description: 'Brak wybranych celów',
+      };
+    }
+    if (savedCount > 0 && extraCount > 0) {
+      return {
+        hasExtras: true,
+        badge: `Do skanu: ${totalCount} (${savedCount} zapisanych + ${extraCount} z grup/ad-hoc)`,
+        description: `${savedCount} zapisanych + ${extraCount} z grup/ad-hoc (łącznie ${totalCount})`,
+      };
+    }
+    if (extraCount > 0) {
+      return {
+        hasExtras: true,
+        badge: `Z grup / ad-hoc: ${extraCount}`,
+        description: `Dodatkowe / z grup (${extraCount})`,
+      };
+    }
+    return {
+      hasExtras: false,
+      badge:
+        savedCount === targets.length
+          ? `Zapisane cele: ${savedCount}`
+          : `Zapisane cele: ${savedCount}/${targets.length}`,
+      description:
+        savedCount === targets.length
+          ? `Zapisane cele (${savedCount})`
+          : `Wybrane zapisane cele (${savedCount} z ${targets.length})`,
+    };
+  }, [includedSavedTargets.length, adHocTargets.length, combinedTargets.length, targets.length]);
+
+  function removeAdHocTarget(targetToRemove: string) {
+    const next = adHocTargets.filter((item) => item !== targetToRemove);
+    setCustomTargetsText(next.join(', '));
+  }
+
   return (
     <div className="space-y-6">
       {error && (
@@ -523,234 +768,551 @@ export function TargetsScansTab({ role, onRefreshAll }: Props) {
         </Alert>
       )}
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {/* Lewa kolumna: Zarządzanie celami */}
-        <Card>
-          <CardHeader className="pb-3 flex-row items-center justify-between space-y-0">
-            <CardTitle>Cele ({targets.length})</CardTitle>
-            {canAdd && (
-              <>
-                <input
-                  ref={targetsFileRef}
-                  type="file"
-                  accept=".csv,.json"
-                  onChange={handleUploadTargets}
-                  className="hidden"
-                />
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => targetsFileRef.current?.click()}
-                >
-                  <Upload className="h-3.5 w-3.5" />
-                  Import (CSV / JSON)
-                </Button>
-              </>
-            )}
-          </CardHeader>
-          <CardContent className="space-y-4">
-            {canAdd && (
-              <form onSubmit={handleAddTarget} className="flex gap-2">
-                <Input
-                  value={newTarget}
-                  onChange={(e) => setNewTarget(e.target.value)}
-                  placeholder="np. 172.28.0.0/22, 10.0.0.1 lub web.agh.edu.pl"
-                  className="flex-1 font-mono"
-                />
-                <Button type="submit" disabled={addingTarget}>
-                  <Plus className="h-3.5 w-3.5" />
-                  {addingTarget ? 'Dodawanie...' : 'Dodaj cel'}
-                </Button>
-              </form>
-            )}
-
-            <div className="rounded-md border border-border overflow-hidden">
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>Typ</TableHead>
-                    <TableHead>Wartość</TableHead>
-                    <TableHead>Dodano</TableHead>
-                    {canDelete && <TableHead className="text-right">Akcja</TableHead>}
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {targets.map((t) => (
-                    <TableRow key={t.id}>
-                      <TableCell>
-                        <Badge variant="secondary" className="uppercase font-mono text-[10px]">
-                          {t.type}
-                        </Badge>
-                      </TableCell>
-                      <TableCell className="font-mono font-medium">{t.raw_value}</TableCell>
-                      <TableCell className="text-muted-foreground font-mono text-[11px]">
-                        {formatTime(t.created_at)}
-                      </TableCell>
-                      {canDelete && (
-                        <TableCell className="text-right">
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            onClick={() => handleDeleteTarget(t.id)}
-                            className="h-7 px-2"
-                          >
-                            <Trash2 className="h-3.5 w-3.5" />
-                            Usuń
-                          </Button>
-                        </TableCell>
-                      )}
-                    </TableRow>
-                  ))}
-                  {targets.length === 0 && (
-                    <TableRow>
-                      <TableCell colSpan={canDelete ? 4 : 3} className="py-6 text-center text-muted-foreground">
-                        Brak zapisanych celów.
-                      </TableCell>
-                    </TableRow>
-                  )}
-                </TableBody>
-              </Table>
+      {/* Zunifikowany panel: Cele & Skanowanie */}
+      <Card>
+        <CardHeader className="pb-3 flex-row flex-wrap items-center justify-between gap-2 space-y-0 border-b border-border/60">
+          <div className="flex flex-wrap items-center gap-2">
+            <CardTitle>Cele &amp; Skanowanie</CardTitle>
+            <Badge
+              variant={scanScope.hasExtras ? 'default' : 'secondary'}
+              className="font-mono text-[10px]"
+            >
+              {scanScope.badge}
+            </Badge>
+          </div>
+          {canAdd && (
+            <div className="flex items-center gap-1.5">
+              <input
+                ref={targetsFileRef}
+                type="file"
+                accept=".csv,.json"
+                onChange={handleUploadTargets}
+                className="hidden"
+              />
+              <Button
+                type="button"
+                variant={showGroupPicker ? 'default' : 'outline'}
+                size="icon"
+                onClick={() => setShowGroupPicker((v) => !v)}
+                title="Dodaj całą listę z grupy (Auto-Grupy / Smart Groups) do skanu"
+                aria-label="Lista grup do dodania do skanu"
+              >
+                <Layers className="h-3.5 w-3.5" />
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => targetsFileRef.current?.click()}
+              >
+                <Upload className="h-3.5 w-3.5" />
+                Import (CSV / JSON)
+              </Button>
             </div>
-          </CardContent>
-        </Card>
+          )}
+        </CardHeader>
 
-        {/* Prawa kolumna: Orkiestrator skanowania (Chunker CIDR & Okna czasowe) */}
-        <Card>
-          <CardHeader className="pb-3">
-            <CardTitle>Skanowanie &amp; Chunker CIDR</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <form onSubmit={handleStartScan} className="space-y-3 text-xs">
-              {profiles.length > 0 && (
-                <label className="block space-y-1">
-                  <span className="text-muted-foreground">Profil skanowania (preset portów i limitów)</span>
-                  <Select
-                    disabled={!canAdd}
-                    value={selectedProfileId}
-                    onChange={(e) => {
-                      const pid = e.target.value;
-                      setSelectedProfileId(pid);
-                      const found = profiles.find((p) => p.id === pid);
-                      if (found) {
-                        setPorts(found.ports);
-                        setRateLimitPps(found.rate_limit_pps);
-                        setChunkPrefix(found.chunk_cidr_prefix);
-                      }
-                    }}
-                    className="font-mono"
+        <CardContent className="pt-4 space-y-4">
+          {/* Rozwijana lista grup (ikona Layers obok Import) */}
+          {canAdd && showGroupPicker && (
+            <div className="rounded-md border border-border bg-muted/40 p-3 space-y-2.5 text-xs">
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-1.5 font-medium text-foreground">
+                  <Layers className="h-3.5 w-3.5 text-muted-foreground" />
+                  <span>Dodaj listę hostów z grupy do skanu ({pickerGroups.length})</span>
+                </div>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  className="h-6 w-6"
+                  onClick={() => setShowGroupPicker(false)}
+                  title="Zamknij listę grup"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </Button>
+              </div>
+
+              <div className="relative">
+                <Search className="pointer-events-none absolute left-2.5 top-2 h-3.5 w-3.5 text-muted-foreground" />
+                <Input
+                  value={groupPickerSearch}
+                  onChange={(e) => setGroupPickerSearch(e.target.value)}
+                  placeholder="Szukaj grupy np. WordPress, 8080, nginx..."
+                  className="pl-8 h-7 text-xs"
+                />
+              </div>
+
+              <div className="max-h-52 overflow-y-auto grid grid-cols-1 md:grid-cols-2 gap-1.5 pr-0.5">
+                {pickerGroups.map((entry) => (
+                  <div
+                    key={entry.key}
+                    className="flex flex-wrap items-center justify-between gap-2 rounded border border-border bg-background px-2.5 py-2 hover:bg-muted/40"
                   >
-                    <option value="">Domyślny (default-safe-lab)</option>
-                    {profiles.map((p) => (
-                      <option key={p.id} value={p.id}>
-                        {p.name} — {p.ports.length > 42 ? `${p.ports.slice(0, 42)}…` : p.ports}
-                      </option>
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-1.5">
+                        <Badge
+                          variant={entry.kind === 'smart' ? 'default' : 'secondary'}
+                          className="font-mono text-[9px] px-1 py-0"
+                        >
+                          {entry.kind === 'smart' ? 'SMART' : 'AUTO'}
+                        </Badge>
+                        <span className="font-medium text-foreground truncate">{entry.label}</span>
+                        <span className="font-mono text-[10px] text-muted-foreground shrink-0">
+                          ({entry.count} IP)
+                        </span>
+                      </div>
+                      {entry.sampleIps.length > 0 && (
+                        <div className="font-mono text-[10px] text-muted-foreground truncate mt-0.5">
+                          {entry.sampleIps.slice(0, 4).join(', ')}
+                          {entry.count > 4 ? ` (+${entry.count - 4})` : ''}
+                        </div>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-1 shrink-0">
+                      <Button
+                        type="button"
+                        size="sm"
+                        disabled={addingGroupKey !== null || entry.count === 0}
+                        onClick={() => handleAddGroupToScan(entry)}
+                        className="h-6 px-2 text-[10px]"
+                        title="Dodaj wszystkie IP tej grupy do kolejki skanu"
+                      >
+                        <Plus className="h-3 w-3" />
+                        {addingGroupKey === `scan:${entry.key}` ? '...' : 'Do skanu'}
+                      </Button>
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        disabled={addingGroupKey !== null || entry.count === 0}
+                        onClick={() => handleAddGroupToTargets(entry)}
+                        className="h-6 px-2 text-[10px]"
+                        title="Zapisz wszystkie IP tej grupy na stałe w tabeli Cele"
+                      >
+                        {addingGroupKey === `targets:${entry.key}` ? '...' : '+ Cele'}
+                      </Button>
+                    </div>
+                  </div>
+                ))}
+                {pickerGroups.length === 0 && (
+                  <div className="md:col-span-2 py-4 text-center text-muted-foreground text-[11px] rounded border border-border bg-background">
+                    Brak grup pasujących do filtra.
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* Jedna spójna siatka: po lewej Co skanować, po prawej Konfiguracja i start */}
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
+            {/* Lewa część: Zapisane cele + dodatkowe cele z grup / ad-hoc (łączone) */}
+            <div className="lg:col-span-7 space-y-3.5">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="text-xs font-medium text-foreground">1. Co skanować</span>
+                <span className="text-[11px] text-muted-foreground font-mono">
+                  Zaznaczone zapisane ({includedSavedTargets.length}/{targets.length})
+                  {adHocTargets.length > 0 ? ` + dodatkowe (${adHocTargets.length})` : ''}
+                </span>
+              </div>
+
+              {/* Stałe cele w bazie + szybkie dodawanie */}
+              <div className="space-y-2">
+                {canAdd && (
+                  <form onSubmit={handleAddTarget} className="flex gap-2">
+                    <Input
+                      value={newTarget}
+                      onChange={(e) => setNewTarget(e.target.value)}
+                      placeholder="Dodaj stały cel: np. 172.28.0.0/22, 10.0.0.1 lub web.agh.edu.pl"
+                      className="flex-1 font-mono h-8 text-xs"
+                    />
+                    <Button type="submit" size="sm" disabled={addingTarget} className="h-8">
+                      <Plus className="h-3.5 w-3.5" />
+                      {addingTarget ? 'Dodawanie...' : 'Dodaj'}
+                    </Button>
+                  </form>
+                )}
+
+                <div className="rounded-md border border-border overflow-hidden max-h-56 overflow-y-auto">
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead className="w-9">
+                          <Checkbox
+                            checked={allSavedIncluded}
+                            disabled={targets.length === 0}
+                            onCheckedChange={toggleAllSavedTargets}
+                            aria-label="Zaznacz lub odznacz wszystkie zapisane cele"
+                            title="Zaznacz / odznacz wszystkie zapisane cele do skanu"
+                          />
+                        </TableHead>
+                        <TableHead className="w-20">Typ</TableHead>
+                        <TableHead>Wartość</TableHead>
+                        <TableHead className="w-36">Dodano</TableHead>
+                        {canDelete && <TableHead className="w-12 text-right">Akcja</TableHead>}
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {targets.map((t) => {
+                        const isIncluded = !excludedTargetIds.has(t.id);
+                        return (
+                          <TableRow key={t.id} className={!isIncluded ? 'opacity-55' : undefined}>
+                            <TableCell className="py-2">
+                              <Checkbox
+                                checked={isIncluded}
+                                onCheckedChange={() => toggleSavedTarget(t.id)}
+                                aria-label={`Uwzględnij cel ${t.raw_value} w skanie`}
+                              />
+                            </TableCell>
+                            <TableCell className="py-2">
+                              <Badge variant="secondary" className="uppercase font-mono text-[10px]">
+                                {t.type}
+                              </Badge>
+                            </TableCell>
+                            <TableCell className="py-2 font-mono font-medium">{t.raw_value}</TableCell>
+                            <TableCell className="py-2 text-muted-foreground font-mono text-[11px]">
+                              {formatTime(t.created_at)}
+                            </TableCell>
+                            {canDelete && (
+                              <TableCell className="py-2 text-right">
+                                <Button
+                                  variant="ghost"
+                                  size="icon"
+                                  onClick={() => handleDeleteTarget(t.id)}
+                                  className="h-7 w-7"
+                                  title="Usuń cel"
+                                  aria-label={`Usuń cel ${t.raw_value}`}
+                                >
+                                  <Trash2 className="h-3.5 w-3.5" />
+                                </Button>
+                              </TableCell>
+                            )}
+                          </TableRow>
+                        );
+                      })}
+                      {targets.length === 0 && (
+                        <TableRow>
+                          <TableCell colSpan={canDelete ? 5 : 4} className="py-5 text-center text-muted-foreground">
+                            Brak zapisanych celów.
+                          </TableCell>
+                        </TableRow>
+                      )}
+                    </TableBody>
+                  </Table>
+                </div>
+              </div>
+
+              {/* Dodatkowe cele do tego skanu (z ikony grup lub ręcznie) — łączone z zapisanymi */}
+              <div
+                className={`rounded-md border p-2.5 space-y-2 text-xs transition-colors ${
+                  adHocTargets.length > 0
+                    ? 'border-foreground/30 bg-muted/40'
+                    : 'border-border bg-muted/15'
+                }`}
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-[11px] text-muted-foreground">
+                    Dodatkowe cele do skanu (z grup / ad-hoc){' '}
+                    <span className="text-[10px]">— łączone z zaznaczonymi celami powyżej</span>
+                  </span>
+                  {canAdd && adHocTargets.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => setCustomTargetsText('')}
+                      className="text-[11px] underline text-muted-foreground hover:text-foreground shrink-0"
+                    >
+                      Wyczyść ({adHocTargets.length})
+                    </button>
+                  )}
+                </div>
+                <Input
+                  disabled={!canAdd}
+                  value={customTargetsText}
+                  onChange={(e) => setCustomTargetsText(e.target.value)}
+                  placeholder="Opcjonalnie: wpisz IP/CIDR (po przecinku) lub dodaj grupę ikoną warstw powyżej"
+                  className="font-mono h-8 text-xs bg-background"
+                />
+                {adHocTargets.length > 0 && (
+                  <div className="flex flex-wrap gap-1 pt-0.5">
+                    {adHocTargets.slice(0, 8).map((item) => (
+                      <Badge
+                        key={item}
+                        variant="secondary"
+                        className="font-mono text-[10px] gap-1 pr-1"
+                      >
+                        {item}
+                        {canAdd && (
+                          <button
+                            type="button"
+                            onClick={() => removeAdHocTarget(item)}
+                            className="hover:text-foreground text-muted-foreground"
+                            title={`Usuń ${item} z listy dodatkowych celów`}
+                          >
+                            <X className="h-2.5 w-2.5" />
+                          </button>
+                        )}
+                      </Badge>
                     ))}
-                  </Select>
-                </label>
-              )}
+                    {adHocTargets.length > 8 && (
+                      <Badge variant="outline" className="font-mono text-[10px]">
+                        +{adHocTargets.length - 8} więcej
+                      </Badge>
+                    )}
+                  </div>
+                )}
+              </div>
+            </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <label className="block space-y-1">
-                  <span className="text-muted-foreground">Cele ad-hoc (opcjonalnie)</span>
-                  <Input
-                    disabled={!canAdd}
-                    value={customTargetsText}
-                    onChange={(e) => setCustomTargetsText(e.target.value)}
-                    placeholder="np. 172.28.0.0/22"
-                    className="font-mono"
-                  />
-                </label>
+            {/* Prawa część: Konfiguracja parametrów i uruchomienie skanu */}
+            <div className="lg:col-span-5 rounded-lg border border-border bg-muted/20 p-4 space-y-3">
+              <span className="block text-xs font-medium text-foreground">2. Parametry i uruchomienie</span>
+
+              <form onSubmit={handleStartScan} className="space-y-3 text-xs">
+                {profiles.length > 0 && (
+                  <label className="block space-y-1">
+                    <span className="text-muted-foreground">Profil skanowania</span>
+                    <Select
+                      disabled={!canAdd}
+                      value={selectedProfileId}
+                      onChange={(e) => {
+                        const pid = e.target.value;
+                        setSelectedProfileId(pid);
+                        const found = profiles.find((p) => p.id === pid);
+                        if (found) {
+                          setPorts(found.ports);
+                          setRateLimitPps(found.rate_limit_pps);
+                          setChunkPrefix(found.chunk_cidr_prefix);
+                        }
+                      }}
+                      className="font-mono bg-background"
+                    >
+                      <option value="">Domyślny (default-safe-lab)</option>
+                      {profiles.map((p) => (
+                        <option key={p.id} value={p.id}>
+                          {p.name} — {p.ports.length > 36 ? `${p.ports.slice(0, 36)}…` : p.ports}
+                        </option>
+                      ))}
+                    </Select>
+                  </label>
+                )}
 
                 <label className="block space-y-1">
-                  <span className="text-muted-foreground">Dozwolone porty (nmap -p / top-1000)</span>
+                  <span className="text-muted-foreground">Porty (nmap -p lub top-1000)</span>
                   <Input
                     disabled={!canAdd}
                     value={ports}
                     onChange={(e) => setPorts(e.target.value)}
                     placeholder="np. 80,443,8080,8443,22 lub top-1000"
-                    className="font-mono"
+                    className="font-mono bg-background"
                   />
                 </label>
-              </div>
 
-              <div className="grid grid-cols-3 gap-3">
-                <label className="space-y-1">
-                  <span className="text-muted-foreground">Maska paczki (CIDR)</span>
-                  <Input
-                    type="number"
-                    min={16}
-                    max={32}
-                    disabled={!canAdd}
-                    value={chunkPrefix}
-                    onChange={(e) => setChunkPrefix(Number(e.target.value))}
-                    className="font-mono"
-                  />
-                </label>
-                <label className="space-y-1">
-                  <span className="text-muted-foreground">Rate-limit (pps)</span>
-                  <Input
-                    type="number"
-                    min={10}
-                    disabled={!canAdd}
-                    value={rateLimitPps}
-                    onChange={(e) => setRateLimitPps(Number(e.target.value))}
-                    className="font-mono"
-                  />
-                </label>
-                <label className="space-y-1">
-                  <span className="text-muted-foreground">Okno (minuty)</span>
-                  <Input
-                    type="number"
-                    min={1}
-                    max={1440}
-                    disabled={!canAdd}
-                    value={windowMinutes}
-                    onChange={(e) => setWindowMinutes(Number(e.target.value))}
-                    className="font-mono"
-                  />
-                </label>
-              </div>
+                {/* Rozwijany Chunker CIDR & Limity — domyślnie zwarty z podsumowaniem na żywo */}
+                <div className="rounded-md border border-border bg-background overflow-hidden">
+                  <button
+                    type="button"
+                    onClick={() => setShowChunkerSettings((v) => !v)}
+                    className="w-full flex items-center justify-between gap-2 px-3 py-2 text-left hover:bg-muted/40 transition-colors"
+                  >
+                    <div className="flex items-center gap-1.5 text-foreground font-medium">
+                      <SlidersHorizontal className="h-3.5 w-3.5 text-muted-foreground" />
+                      <span>Chunker CIDR &amp; limity</span>
+                    </div>
+                    <div className="flex items-center gap-1.5 font-mono text-[10px] text-muted-foreground">
+                      <span>
+                        {adaptiveChunking ? 'auto /24–/28' : `/${chunkPrefix}`} · {rateLimitPps} pps ·{' '}
+                        {windowMinutes}m
+                      </span>
+                      {showChunkerSettings ? (
+                        <ChevronUp className="h-3.5 w-3.5 shrink-0" />
+                      ) : (
+                        <ChevronDown className="h-3.5 w-3.5 shrink-0" />
+                      )}
+                    </div>
+                  </button>
 
-              <div className="space-y-2 pt-1 text-foreground">
-                <label className="flex items-center gap-2 cursor-pointer">
-                  <Checkbox
-                    disabled={!canAdd}
-                    checked={adaptiveChunking}
-                    onCheckedChange={(v) => setAdaptiveChunking(Boolean(v))}
-                  />
-                  <span>Adaptacyjny podział paczek (dobór maski /24–/28 wg szybkości skanowania i okna + ETA)</span>
-                </label>
-                <label className="flex items-center gap-2 cursor-pointer">
+                  {showChunkerSettings && (
+                    <div className="px-3 pb-3 pt-2.5 border-t border-border/60 space-y-3 bg-muted/15">
+                      <div className="grid grid-cols-3 gap-2.5">
+                        <label className="space-y-1">
+                          <span className="text-[11px] text-muted-foreground">Maska CIDR</span>
+                          <Input
+                            type="number"
+                            min={16}
+                            max={32}
+                            disabled={!canAdd || adaptiveChunking}
+                            value={chunkPrefix}
+                            onChange={(e) => setChunkPrefix(Number(e.target.value))}
+                            className="font-mono h-8 text-xs bg-background"
+                            title={
+                              adaptiveChunking
+                                ? 'Maska dobierana automatycznie (wyłącz tryb adaptacyjny, aby ustawić ręcznie)'
+                                : 'Maska podziału podsieci'
+                            }
+                          />
+                        </label>
+                        <label className="space-y-1">
+                          <span className="text-[11px] text-muted-foreground">Rate-limit (pps)</span>
+                          <Input
+                            type="number"
+                            min={10}
+                            disabled={!canAdd}
+                            value={rateLimitPps}
+                            onChange={(e) => setRateLimitPps(Number(e.target.value))}
+                            className="font-mono h-8 text-xs bg-background"
+                          />
+                        </label>
+                        <label className="space-y-1">
+                          <span className="text-[11px] text-muted-foreground">Okno (min)</span>
+                          <Input
+                            type="number"
+                            min={1}
+                            max={1440}
+                            disabled={!canAdd}
+                            value={windowMinutes}
+                            onChange={(e) => setWindowMinutes(Number(e.target.value))}
+                            className="font-mono h-8 text-xs bg-background"
+                          />
+                        </label>
+                      </div>
+
+                      <label className="flex items-start gap-2 cursor-pointer text-foreground">
+                        <Checkbox
+                          disabled={!canAdd}
+                          checked={adaptiveChunking}
+                          onCheckedChange={(v) => setAdaptiveChunking(Boolean(v))}
+                          className="mt-0.5"
+                        />
+                        <span className="text-[11px] leading-snug">
+                          Adaptacyjny podział paczek (auto /24–/28 wg szybkości i okna + ETA)
+                        </span>
+                      </label>
+                    </div>
+                  )}
+                </div>
+
+                {/* Tryb Dry-Run */}
+                <label className="flex items-start gap-2 cursor-pointer rounded-md border border-border bg-background px-3 py-2 text-foreground">
                   <Checkbox
                     disabled={!canAdd}
                     checked={dryRun}
                     onCheckedChange={(v) => setDryRun(Boolean(v))}
+                    className="mt-0.5"
                   />
-                  <span>Tryb Dry-Run (podgląd wygenerowanych paczek CIDR i ETA bez kolejkowania w Redis)</span>
+                  <span className="text-[11px] leading-snug">
+                    <span className="font-medium">Tryb Dry-Run</span>{' '}
+                    <span className="text-muted-foreground">
+                      — podgląd paczek CIDR i ETA bez kolejkowania w Redis
+                    </span>
+                  </span>
                 </label>
+
+                {/* Podsumowanie zakresu + przycisk start */}
+                <div className="pt-2 border-t border-border/60 space-y-2.5">
+                  <div className="flex items-center justify-between gap-2 text-[11px]">
+                    <span className="text-muted-foreground">Aktywny zakres:</span>
+                    <span className="font-mono font-medium text-foreground truncate">{scanScope.description}</span>
+                  </div>
+
+                  {canAdd ? (
+                    <Button type="submit" disabled={busy || combinedTargets.length === 0} className="w-full">
+                      <Play className="h-3.5 w-3.5" />
+                      {busy ? 'Przetwarzanie...' : dryRun ? 'Podgląd paczek (Dry-Run)' : 'Uruchom skan'}
+                    </Button>
+                  ) : (
+                    <p className="text-muted-foreground text-[11px]">
+                      Uruchamianie skanów wymaga roli <code className="font-mono">add_delete_modify</code> lub{' '}
+                      <code className="font-mono">admin</code>.
+                    </p>
+                  )}
+                </div>
+              </form>
+            </div>
+          </div>
+
+          {/* Wynik Dry-Run / zakolejkowania skanu */}
+          {scanResult && (
+            <div className="rounded-md border border-border bg-muted/30 p-3 space-y-2.5 text-xs">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <Badge variant={scanResult.dry_run ? 'secondary' : 'default'} className="font-mono text-[10px]">
+                    {scanResult.dry_run ? 'Dry-Run (podgląd)' : 'Zakolejkowano skan'}
+                  </Badge>
+                  {typeof scanResult.total_chunks === 'number' && (
+                    <Badge variant="outline" className="font-mono text-[10px]">
+                      Paczek: {scanResult.total_chunks}
+                    </Badge>
+                  )}
+                  {typeof scanResult.chunk_cidr_prefix === 'number' && (
+                    <Badge variant="outline" className="font-mono text-[10px]">
+                      Maska: /{scanResult.chunk_cidr_prefix}
+                    </Badge>
+                  )}
+                  {typeof scanResult.estimated_duration_seconds === 'number' && (
+                    <Badge variant="outline" className="font-mono text-[10px]">
+                      ETA: {scanResult.estimated_duration_seconds}s
+                    </Badge>
+                  )}
+                  {typeof scanResult.ports === 'string' && (
+                    <Badge variant="outline" className="font-mono text-[10px]">
+                      Porty: {scanResult.ports}
+                    </Badge>
+                  )}
+                  {scanResult.fits_in_window === false && (
+                    <Badge variant="outline" className="font-mono text-[10px] border-foreground/50">
+                      Przekracza okno czasowe
+                    </Badge>
+                  )}
+                </div>
+                <div className="flex items-center gap-1">
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => setShowRawScanJson((v) => !v)}
+                    className="h-6 px-2 text-[11px]"
+                  >
+                    {showRawScanJson ? 'Ukryj JSON' : 'Pokaż JSON'}
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    onClick={() => {
+                      setScanResult(null);
+                      setShowRawScanJson(false);
+                    }}
+                    className="h-6 w-6"
+                    title="Zamknij podgląd wyniku"
+                  >
+                    <X className="h-3.5 w-3.5" />
+                  </Button>
+                </div>
               </div>
 
-              {canAdd ? (
-                <Button type="submit" disabled={busy} className="mt-1">
-                  <Play className="h-3.5 w-3.5" />
-                  {busy ? 'Przetwarzanie...' : dryRun ? 'Podgląd paczek (Dry-Run)' : 'Uruchom skan'}
-                </Button>
-              ) : (
-                <p className="text-muted-foreground">
-                  Uruchamianie skanów wymaga roli <code className="font-mono">add_delete_modify</code> lub{' '}
-                  <code className="font-mono">admin</code>.
-                </p>
+              {Array.isArray(scanResult.chunks) && scanResult.chunks.length > 0 && (
+                <div className="flex flex-wrap gap-1">
+                  {(scanResult.chunks as string[]).slice(0, 12).map((chunk) => (
+                    <Badge key={chunk} variant="secondary" className="font-mono text-[10px]">
+                      {chunk}
+                    </Badge>
+                  ))}
+                  {scanResult.chunks.length > 12 && (
+                    <Badge variant="outline" className="font-mono text-[10px]">
+                      +{scanResult.chunks.length - 12} kolejnych paczek
+                    </Badge>
+                  )}
+                </div>
               )}
-            </form>
 
-            {scanResult && (
-              <pre className="p-3 rounded-md bg-muted border border-border text-[11px] font-mono text-foreground overflow-x-auto max-h-56">
-                {JSON.stringify(scanResult, null, 2)}
-              </pre>
-            )}
-          </CardContent>
-        </Card>
-      </div>
+              {showRawScanJson && (
+                <pre className="p-2.5 rounded-md bg-background border border-border text-[11px] font-mono text-foreground overflow-x-auto max-h-56">
+                  {JSON.stringify(scanResult, null, 2)}
+                </pre>
+              )}
+            </div>
+          )}
+        </CardContent>
+      </Card>
 
       {/* Harmonogramy cyklicznych skanów i okna czasowe (HH:MM-HH:MM + auto-resume) */}
       <Card>
@@ -762,8 +1324,8 @@ export function TargetsScansTab({ role, onRefreshAll }: Props) {
         </CardHeader>
         <CardContent className="space-y-4">
           {(editingSchedId ? canModify : canAdd) && (
-            <form onSubmit={handleCreateSchedule} className="grid grid-cols-1 md:grid-cols-6 gap-2.5 text-xs items-end">
-              <label className="space-y-1 md:col-span-2">
+            <form onSubmit={handleCreateSchedule} className="grid grid-cols-1 md:grid-cols-12 gap-2.5 text-xs items-end">
+              <label className="space-y-1 md:col-span-3">
                 <span className="text-muted-foreground">
                   {editingSchedId ? 'Edycja harmonogramu' : 'Nazwa harmonogramu'}
                 </span>
@@ -771,10 +1333,25 @@ export function TargetsScansTab({ role, onRefreshAll }: Props) {
                   required
                   value={schedName}
                   onChange={(e) => setSchedName(e.target.value)}
-                  placeholder="np. Nocny skan kampusu AGH"
+                  placeholder="np. Nocny skan WordPress"
                 />
               </label>
-              <label className="space-y-1">
+              <label className="space-y-1 md:col-span-3">
+                <span className="text-muted-foreground">Grupa docelowa (Static / Smart Group)</span>
+                <Select
+                  value={schedGroupId}
+                  onChange={(e) => setSchedGroupId(e.target.value)}
+                  className="font-mono text-xs"
+                >
+                  <option value="">Domyślna (local-lab)</option>
+                  {groups.map((g) => (
+                    <option key={g.id} value={g.id}>
+                      [{g.group_type === 'dynamic' ? 'AUTO' : 'STATIC'}] {g.name} ({g.member_count})
+                    </option>
+                  ))}
+                </Select>
+              </label>
+              <label className="space-y-1 md:col-span-2">
                 <span className="text-muted-foreground">Częstotliwość (cron)</span>
                 <Input
                   required
@@ -784,25 +1361,25 @@ export function TargetsScansTab({ role, onRefreshAll }: Props) {
                   className="font-mono"
                 />
               </label>
-              <label className="space-y-1">
+              <label className="space-y-1 md:col-span-2">
                 <span className="text-muted-foreground">Okno od – do</span>
                 <div className="flex items-center gap-1">
                   <Input
                     type="time"
                     value={schedWinStart}
                     onChange={(e) => setSchedWinStart(e.target.value)}
-                    className="font-mono px-2"
+                    className="font-mono px-1.5"
                   />
                   <Input
                     type="time"
                     value={schedWinEnd}
                     onChange={(e) => setSchedWinEnd(e.target.value)}
-                    className="font-mono px-2"
+                    className="font-mono px-1.5"
                   />
                 </div>
               </label>
-              <label className="space-y-1">
-                <span className="text-muted-foreground">Próg missed</span>
+              <label className="space-y-1 md:col-span-1">
+                <span className="text-muted-foreground">Missed</span>
                 <Input
                   type="number"
                   min={1}
@@ -812,10 +1389,10 @@ export function TargetsScansTab({ role, onRefreshAll }: Props) {
                   className="font-mono"
                 />
               </label>
-              <div className="flex gap-1.5">
-                <Button type="submit" disabled={savingSched} className="flex-1">
+              <div className="flex gap-1.5 md:col-span-1">
+                <Button type="submit" disabled={savingSched} className="flex-1 px-2">
                   {editingSchedId ? <Edit3 className="h-3.5 w-3.5" /> : <Plus className="h-3.5 w-3.5" />}
-                  {savingSched ? 'Zapis...' : editingSchedId ? 'Zapisz' : 'Dodaj'}
+                  {savingSched ? '...' : editingSchedId ? 'OK' : 'Dodaj'}
                 </Button>
                 {editingSchedId && (
                   <Button type="button" variant="outline" size="icon" onClick={resetScheduleForm} title="Anuluj edycję">
@@ -831,6 +1408,7 @@ export function TargetsScansTab({ role, onRefreshAll }: Props) {
               <TableHeader>
                 <TableRow>
                   <TableHead>Nazwa</TableHead>
+                  <TableHead>Grupa docelowa</TableHead>
                   <TableHead>Cron</TableHead>
                   <TableHead>Okno czasowe</TableHead>
                   <TableHead>Próg missed</TableHead>
@@ -842,6 +1420,17 @@ export function TargetsScansTab({ role, onRefreshAll }: Props) {
                 {schedules.map((s) => (
                   <TableRow key={s.id}>
                     <TableCell className="font-medium text-foreground">{s.name}</TableCell>
+                    <TableCell>
+                      <div className="flex items-center gap-1.5 font-mono text-xs">
+                        <Badge
+                          variant={s.target_group_type === 'dynamic' ? 'default' : 'outline'}
+                          className="font-mono text-[9px] uppercase"
+                        >
+                          {s.target_group_type === 'dynamic' ? 'AUTO' : 'STATIC'}
+                        </Badge>
+                        <span>{s.target_group_name || s.target_group_id.slice(0, 8)}</span>
+                      </div>
+                    </TableCell>
                     <TableCell className="font-mono text-xs">{s.cron_expression}</TableCell>
                     <TableCell className="font-mono text-xs">
                       {s.window_start}–{s.window_end} ({s.timezone}){' '}
@@ -890,7 +1479,7 @@ export function TargetsScansTab({ role, onRefreshAll }: Props) {
                 ))}
                 {schedules.length === 0 && (
                   <TableRow>
-                    <TableCell colSpan={canModify || canDelete ? 6 : 5} className="py-5 text-center text-muted-foreground">
+                    <TableCell colSpan={canModify || canDelete ? 7 : 6} className="py-5 text-center text-muted-foreground">
                       Brak zdefiniowanych harmonogramów cyklicznych.
                     </TableCell>
                   </TableRow>

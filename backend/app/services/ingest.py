@@ -38,6 +38,45 @@ MAX_REGEX_LEN = 256
 UNSAFE_PYTHON_REGEX_MARKERS = ("(?=", "(?!", "(?<=", "(?<!")
 
 
+def _is_port_in_ports_spec(port: int, protocol: str, ports_spec: str | None) -> bool:
+    """
+    Sprawdza, czy dany port/protokół mieścił się w specyfikacji portów bieżącego skanu.
+    Chroni przed fałszywym zamykaniem nieskanowanych portów (np. gdy skan celowany bada wyłącznie port 8080).
+    Dla None lub 'top-1000' zwraca True (zachowanie pełnego skanu).
+    """
+    if not ports_spec:
+        return True
+    cleaned = ports_spec.strip().replace(" ", "")
+    if not cleaned or cleaned.lower() == "top-1000":
+        return True
+
+    proto_lower = (protocol or "tcp").lower()
+    active_proto: str | None = None
+    for token in cleaned.split(","):
+        tok = token.strip()
+        if not tok:
+            continue
+        if tok.upper().startswith("T:"):
+            active_proto = "tcp"
+            tok = tok[2:]
+        elif tok.upper().startswith("U:"):
+            active_proto = "udp"
+            tok = tok[2:]
+
+        token_proto = active_proto or "tcp"
+        if token_proto != proto_lower:
+            continue
+
+        if "-" in tok:
+            bounds = tok.split("-", 1)
+            if len(bounds) == 2 and bounds[0].isdigit() and bounds[1].isdigit():
+                if int(bounds[0]) <= port <= int(bounds[1]):
+                    return True
+        elif tok.isdigit() and int(tok) == port:
+            return True
+    return False
+
+
 def _ensure_scan_run(db: Session, scan_run_id: UUID, now: datetime) -> ScanRun:
     """Zwraca istniejący ScanRun lub tworzy rekord ad-hoc (gwarantując grupę i profil nawet na pustej bazie)."""
     scan_run = db.get(ScanRun, scan_run_id)
@@ -670,10 +709,13 @@ def ingest_scan_result(
                             )
                             db.delete(sm)
 
-        # Usługi wcześniej otwarte, które nie odpowiedziały (tylko aktywny skan)
+        # Usługi wcześniej otwarte, które nie odpowiedziały (tylko aktywny skan i tylko porty z zakresu tego skanu)
         if is_active_scanner:
+            scanned_ports_spec = scan_run.scanned_ports if scan_run is not None else None
             for key, svc in existing_services.items():
                 if svc.state in ("open", "unstable") and key not in seen_service_keys:
+                    if not _is_port_in_ports_spec(svc.port, svc.protocol, scanned_ports_spec):
+                        continue
                     prev_state = svc.state
                     svc.missed_scans = (svc.missed_scans or 0) + 1
                     if svc.missed_scans >= threshold:

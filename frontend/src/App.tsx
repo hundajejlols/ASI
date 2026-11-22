@@ -4,6 +4,7 @@ import { API_BASE, apiFetch, setAuthToken, syncDynamicRoles } from './api';
 import { ChangesTab } from './components/ChangesTab';
 import { DashboardTab } from './components/DashboardTab';
 import { DefectDojoTab } from './components/DefectDojoTab';
+import { GroupsTab } from './components/GroupsTab';
 import { HostsTab } from './components/HostsTab';
 import { RbacAuditTab } from './components/RbacAuditTab';
 import { SignaturesTab } from './components/SignaturesTab';
@@ -22,15 +23,17 @@ import type {
   HealthResponse,
   HostSummary,
   RoleItem,
+  SignatureDraft,
   UserRole,
 } from './types';
 
-type TabKey = 'dashboard' | 'hosts' | 'changes' | 'targets' | 'signatures' | 'defectdojo' | 'rbac';
+type TabKey = 'dashboard' | 'hosts' | 'groups' | 'changes' | 'targets' | 'signatures' | 'defectdojo' | 'rbac';
 type ThemeMode = 'dark' | 'light';
 
 const TABS: { key: TabKey; label: string }[] = [
   { key: 'dashboard', label: 'Dashboard' },
   { key: 'hosts', label: 'Hosts' },
+  { key: 'groups', label: 'Groups' },
   { key: 'changes', label: 'Diff' },
   { key: 'targets', label: 'Targets & Scans' },
   { key: 'signatures', label: 'Signatures' },
@@ -59,6 +62,9 @@ export default function App() {
   const [loggingIn, setLoggingIn] = useState(false);
 
   const [activeTab, setActiveTab] = useState<TabKey>('dashboard');
+  const [signatureDraft, setSignatureDraft] = useState<SignatureDraft | null>(null);
+  const [groupSearchQuery, setGroupSearchQuery] = useState<string | null>(null);
+  const [ddPreselect, setDdPreselect] = useState<{ hostIds: string[]; label: string } | null>(null);
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [hosts, setHosts] = useState<HostSummary[]>([]);
   const [changes, setChanges] = useState<ChangeEvent[]>([]);
@@ -150,6 +156,33 @@ export default function App() {
     setAuthToken(null);
     setSession(null);
   }
+
+  const handleCreateSignatureFromHost = useCallback((draft: SignatureDraft) => {
+    setSignatureDraft(draft);
+    setActiveTab('signatures');
+  }, []);
+
+  const handleSignatureDraftConsumed = useCallback(() => {
+    setSignatureDraft(null);
+  }, []);
+
+  const handleOpenGroupSearch = useCallback((query: string) => {
+    setGroupSearchQuery(query);
+    setActiveTab('groups');
+  }, []);
+
+  const handleGroupSearchConsumed = useCallback(() => {
+    setGroupSearchQuery(null);
+  }, []);
+
+  const handleExportGroupToDefectDojo = useCallback((hostIds: string[], label: string) => {
+    setDdPreselect({ hostIds, label });
+    setActiveTab('defectdojo');
+  }, []);
+
+  const handleDdPreselectConsumed = useCallback(() => {
+    setDdPreselect(null);
+  }, []);
 
   return (
     <Tabs
@@ -318,10 +351,25 @@ export default function App() {
             changes={changes}
             summary={summary}
             onRefresh={refreshCoreData}
+            onOpenGroupSearch={handleOpenGroupSearch}
           />
         </TabsContent>
         <TabsContent value="hosts" className="mt-0">
-          <HostsTab role={effectiveRole} hosts={hosts} onRefresh={refreshCoreData} />
+          <HostsTab
+            role={effectiveRole}
+            hosts={hosts}
+            onRefresh={refreshCoreData}
+            onCreateSignature={handleCreateSignatureFromHost}
+          />
+        </TabsContent>
+        <TabsContent value="groups" className="mt-0">
+          <GroupsTab
+            role={effectiveRole}
+            initialSearch={groupSearchQuery}
+            onInitialSearchConsumed={handleGroupSearchConsumed}
+            onRefreshAll={refreshCoreData}
+            onExportGroupToDefectDojo={handleExportGroupToDefectDojo}
+          />
         </TabsContent>
         <TabsContent value="changes" className="mt-0">
           <ChangesTab role={effectiveRole} changes={changes} onRefresh={refreshCoreData} />
@@ -330,10 +378,20 @@ export default function App() {
           <TargetsScansTab role={effectiveRole} onRefreshAll={refreshCoreData} />
         </TabsContent>
         <TabsContent value="signatures" className="mt-0">
-          <SignaturesTab role={effectiveRole} />
+          <SignaturesTab
+            role={effectiveRole}
+            initialDraft={signatureDraft}
+            onDraftConsumed={handleSignatureDraftConsumed}
+          />
         </TabsContent>
         <TabsContent value="defectdojo" className="mt-0">
-          <DefectDojoTab role={effectiveRole} hosts={hosts} />
+          <DefectDojoTab
+            role={effectiveRole}
+            hosts={hosts}
+            preselectedHostIds={ddPreselect?.hostIds ?? null}
+            preselectedGroupLabel={ddPreselect?.label ?? null}
+            onPreselectionConsumed={handleDdPreselectConsumed}
+          />
         </TabsContent>
         <TabsContent value="rbac" className="mt-0">
           <RbacAuditTab role={effectiveRole} onRolesChanged={refreshRoles} />

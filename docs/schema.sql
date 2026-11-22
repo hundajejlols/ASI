@@ -59,6 +59,8 @@ CREATE TABLE target_groups (
     name            VARCHAR(128) NOT NULL UNIQUE,
     description     TEXT,
     environment     VARCHAR(32) NOT NULL DEFAULT 'prod', -- prod, staging, test, lab
+    group_type      VARCHAR(16) NOT NULL DEFAULT 'static', -- static | dynamic
+    filter_rules    JSONB NOT NULL DEFAULT '{}'::jsonb,    -- reguły grup automatycznych (Smart Groups)
     created_by      UUID REFERENCES users(id) ON DELETE SET NULL,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -128,6 +130,7 @@ CREATE TABLE scan_runs (
     target_group_id     UUID NOT NULL REFERENCES target_groups(id) ON DELETE CASCADE,
     profile_id          UUID NOT NULL REFERENCES scan_profiles(id) ON DELETE RESTRICT,
     status              scan_run_status NOT NULL DEFAULT 'queued',
+    scanned_ports       TEXT,                            -- efektywna lista portów tego przebiegu (ochrona przed zamykaniem nieskanowanych portów)
     window_deadline_at  TIMESTAMPTZ,                     -- twardy deadline bieżącego okna czasowego
     total_chunks        INT NOT NULL DEFAULT 0,
     completed_chunks    INT NOT NULL DEFAULT 0,

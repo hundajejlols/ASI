@@ -260,6 +260,19 @@ def seed_default_signatures(db: Session) -> int:
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS custom_role_name VARCHAR(64) REFERENCES rbac_roles(name) ON DELETE SET NULL"
         )
     )
+    db.execute(
+        text(
+            "ALTER TABLE target_groups ADD COLUMN IF NOT EXISTS group_type VARCHAR(16) NOT NULL DEFAULT 'static'"
+        )
+    )
+    db.execute(
+        text(
+            "ALTER TABLE target_groups ADD COLUMN IF NOT EXISTS filter_rules JSONB NOT NULL DEFAULT '{}'::jsonb"
+        )
+    )
+    db.execute(
+        text("ALTER TABLE scan_runs ADD COLUMN IF NOT EXISTS scanned_ports TEXT")
+    )
     db.commit()
 
     # 2. Domyślna grupa i profile skanowania (chroni przed pustą bazą)

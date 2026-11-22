@@ -272,6 +272,8 @@ export interface ScheduleItem {
   id: string;
   name: string;
   target_group_id: string;
+  target_group_name?: string | null;
+  target_group_type?: string | null;
   profile_id: string;
   cron_expression: string;
   window_start: string;
@@ -284,6 +286,114 @@ export interface ScheduleItem {
   created_at: string;
 }
 
+export type HostStatusValue = 'online' | 'unstable' | 'offline' | 'archived';
+export type AutoGroupCategory = 'technology' | 'port' | 'classification' | 'signature' | 'override';
+
+export interface GroupFilterRules {
+  match_mode: 'all' | 'any';
+  technologies: string[];
+  ports: number[];
+  service_names: string[];
+  products: string[];
+  signature_ids: string[];
+  favicon_hashes: string[];
+  is_admin_panel: boolean | null;
+  is_staging_env: boolean | null;
+  statuses: HostStatusValue[];
+  owner_units: string[];
+  tags: string[];
+  cidr_scope: string | null;
+  exclude_ignored: boolean;
+}
+
+export interface AutoGroupItem {
+  key: string;
+  category: AutoGroupCategory;
+  label: string;
+  description: string;
+  host_count: number;
+  host_ids: string[];
+  sample_ips: string[];
+  matched_ports: number[];
+  suggested_ports_spec: string | null;
+  filter_rules: GroupFilterRules;
+}
+
+export interface GroupFacets {
+  technologies: string[];
+  ports: number[];
+  service_names: string[];
+  products: string[];
+  owner_units: string[];
+  tags: string[];
+  favicons: string[];
+  signatures: Array<{ id: string; name: string; severity: Severity }>;
+}
+
+export interface AutoGroupsResponse {
+  generated_at: string;
+  total_auto_groups: number;
+  facets: GroupFacets;
+  groups: AutoGroupItem[];
+}
+
+export interface GroupMemberHost {
+  id: string;
+  ip_address: string;
+  hostname: string | null;
+  status: HostStatusValue;
+  missed_scans: number;
+  open_ports: number[];
+  matched_ports: number[];
+  technologies: string[];
+  is_admin_panel: boolean;
+  is_staging_env: boolean;
+  custom_label: string | null;
+  owner_unit: string | null;
+  tags: string[];
+}
+
+export interface GroupPreviewResponse {
+  total_hosts: number;
+  host_ids: string[];
+  ips: string[];
+  matched_ports: number[];
+  suggested_ports_spec: string | null;
+  hosts: GroupMemberHost[];
+  truncated: boolean;
+}
+
+export interface SavedGroupItem {
+  id: string;
+  name: string;
+  description: string | null;
+  environment: string;
+  group_type: 'static' | 'dynamic' | string;
+  filter_rules: Partial<GroupFilterRules>;
+  member_count: number;
+  host_ids: string[];
+  sample_ips: string[];
+  matched_ports: number[];
+  suggested_ports_spec: string | null;
+  created_at: string;
+}
+
+export interface GroupScanResponse {
+  dry_run: boolean;
+  queued?: boolean;
+  scan_run_id?: string;
+  status?: string;
+  group_label: string;
+  ports_mode: 'profile' | 'matched_ports' | 'custom';
+  ports?: string;
+  matched_hosts_count: number;
+  matched_ips: string[];
+  total_chunks: number;
+  chunks: string[];
+  estimated_duration_seconds?: number;
+  window_deadline_utc?: string;
+}
+
 export interface SignatureItem {
   id: string;
   name: string;
@@ -294,6 +404,110 @@ export interface SignatureItem {
   probe_path: string | null;
   expected_status: number | null;
   is_enabled: boolean;
+}
+
+export interface SignaturePortable {
+  name: string;
+  description: string | null;
+  severity: Severity;
+  match_type: SignatureMatchType;
+  pattern: string;
+  probe_path: string | null;
+  expected_status: number | null;
+  is_enabled: boolean;
+}
+
+export interface SignatureExportBundle {
+  schema_version: string;
+  exported_at: string;
+  count: number;
+  signatures: SignaturePortable[];
+}
+
+export type SignatureImportItemStatus =
+  | 'created'
+  | 'updated'
+  | 'skipped'
+  | 'error'
+  | 'would_create'
+  | 'would_update'
+  | 'would_skip';
+
+export interface SignatureImportItemResult {
+  index: number;
+  name: string;
+  match_type: string | null;
+  severity: string | null;
+  pattern: string | null;
+  status: SignatureImportItemStatus;
+  message: string;
+}
+
+export interface SignatureImportResponse {
+  dry_run: boolean;
+  on_conflict: 'skip' | 'overwrite' | 'error';
+  summary: {
+    total: number;
+    created: number;
+    updated: number;
+    skipped: number;
+    errors: number;
+  };
+  items: SignatureImportItemResult[];
+}
+
+export interface SignatureTestDbMatch {
+  host_id: string;
+  ip_address: string;
+  hostname: string | null;
+  port: number;
+  protocol: string;
+  url: string;
+  evidence: string;
+}
+
+export interface SignatureTestResponse {
+  valid: boolean;
+  match_type: SignatureMatchType;
+  pattern: string;
+  probe_path: string | null;
+  expected_status: number | null;
+  sample_match: boolean;
+  sample_evidence: string | null;
+  sample_note: string | null;
+  db_test: {
+    supported: boolean;
+    note: string | null;
+    services_checked: number;
+    matches_count: number;
+    matches: SignatureTestDbMatch[];
+  } | null;
+}
+
+export interface ObservedArtifactsResponse {
+  header_names: string[];
+  cookies: string[];
+  favicons: Array<{
+    hash: string;
+    count: number;
+    sample_endpoints: string[];
+  }>;
+}
+
+export interface SignatureDraft {
+  name?: string;
+  description?: string;
+  severity?: Severity;
+  match_type: SignatureMatchType;
+  header_name?: string;
+  header_value?: string;
+  header_op?: 'exists' | 'contains' | 'equals' | 'starts_with' | 'version';
+  cookie_name?: string;
+  favicon_hash?: string;
+  pattern?: string;
+  probe_path?: string;
+  expected_status?: number | null;
+  sample_hint?: string;
 }
 
 export interface DefectDojoConfig {

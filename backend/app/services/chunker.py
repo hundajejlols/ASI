@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.db.models import CustomSignature, Host, ScanChunk, ScanProfile, ScanRun, Target, TargetGroup
 from app.schemas.contract import ScanJobChunk, ScanProfilePayload, SignatureRulePayload
+from app.services.groups import resolve_hosts_by_rules
 from app.services.seed import ensure_default_group_and_profile
 
 DOMAIN_RE = re.compile(r"^(?=.{1,253}$)(?!-)[A-Za-z0-9-]{1,63}(?<!-)(\.(?!-)[A-Za-z0-9-]{1,63}(?<!-))+$")
@@ -428,6 +429,14 @@ def start_scan_run(
     if raw_targets:
         for item in raw_targets:
             typed_targets.append(detect_target_type(item))
+    elif group.group_type == "dynamic":
+        resolved = resolve_hosts_by_rules(db, group.filter_rules)
+        for ip_str in resolved["ips"]:
+            typed_targets.append(detect_target_type(ip_str))
+        if not typed_targets:
+            raise ValueError(
+                f"Grupa automatyczna '{group.name}' nie dopasowuje obecnie żadnych hostów spełniających reguły."
+            )
     else:
         db_targets = db.execute(
             select(Target).where(Target.group_id == group.id, Target.is_active.is_(True))
@@ -470,6 +479,7 @@ def start_scan_run(
         target_group_id=group.id,
         profile_id=profile.id,
         status="queued",
+        scanned_ports=profile_payload.ports,
         window_deadline_at=deadline,
         total_chunks=len(chunk_targets),
         completed_chunks=0,
@@ -597,11 +607,14 @@ def resume_scan_run(
     db.commit()
 
     signatures = load_active_signatures(db) if profile.signatures_enabled else []
+    effective_resume_ports = ports_override if (ports_override and ports_override.strip()) else scan_run.scanned_ports
     profile_payload = build_profile_payload(
         profile,
         rate_limit_override=rate_limit_pps,
-        ports_override=ports_override,
+        ports_override=effective_resume_ports,
     )
+    scan_run.scanned_ports = profile_payload.ports
+    db.commit()
 
     try:
         rdb = redis.Redis.from_url(settings.redis_url, socket_connect_timeout=3)

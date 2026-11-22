@@ -1,7 +1,15 @@
 import { AlertCircle, CheckCircle2, Plug, Search, Send, Server, ShieldCheck } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { apiFetch, hasPermission } from '../api';
-import type { DefectDojoConfig, DefectDojoExportResponse, HostSummary, UserRole } from '../types';
+import type {
+  AutoGroupItem,
+  AutoGroupsResponse,
+  DefectDojoConfig,
+  DefectDojoExportResponse,
+  HostSummary,
+  SavedGroupItem,
+  UserRole,
+} from '../types';
 import { formatTime } from './Badges';
 import { Alert, AlertDescription } from './ui/alert';
 import { Badge } from './ui/badge';
@@ -9,14 +17,24 @@ import { Button } from './ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './ui/card';
 import { Checkbox } from './ui/checkbox';
 import { Input } from './ui/input';
+import { Select } from './ui/select';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from './ui/table';
 
 interface Props {
   role: UserRole;
   hosts?: HostSummary[];
+  preselectedHostIds?: string[] | null;
+  preselectedGroupLabel?: string | null;
+  onPreselectionConsumed?: () => void;
 }
 
-export function DefectDojoTab({ role, hosts = [] }: Props) {
+export function DefectDojoTab({
+  role,
+  hosts = [],
+  preselectedHostIds = null,
+  preselectedGroupLabel = null,
+  onPreselectionConsumed,
+}: Props) {
   const [config, setConfig] = useState<DefectDojoConfig | null>(null);
   const [baseUrl, setBaseUrl] = useState('');
   const [productTypeName, setProductTypeName] = useState('AGH Attack Surface');
@@ -28,6 +46,9 @@ export function DefectDojoTab({ role, hosts = [] }: Props) {
   const [closeOldFindings, setCloseOldFindings] = useState(true);
   const [dryRun, setDryRun] = useState(true);
   const [selectedHostIds, setSelectedHostIds] = useState<string[]>([]);
+  const [savedGroups, setSavedGroups] = useState<SavedGroupItem[]>([]);
+  const [autoGroups, setAutoGroups] = useState<AutoGroupItem[]>([]);
+  const [selectedGroupPreset, setSelectedGroupPreset] = useState('');
   const [hostSearch, setHostSearch] = useState('');
   const [visibleHosts, setVisibleHosts] = useState<HostSummary[]>(hosts);
   const [searchingHosts, setSearchingHosts] = useState(false);
@@ -62,7 +83,23 @@ export function DefectDojoTab({ role, hosts = [] }: Props) {
     setTestResult(null);
     setExportResult(null);
     loadConfig();
+    Promise.all([
+      apiFetch<SavedGroupItem[]>('/groups', role).catch(() => []),
+      apiFetch<AutoGroupsResponse>('/groups/auto', role).catch(() => null),
+    ]).then(([sg, ag]) => {
+      setSavedGroups(sg || []);
+      setAutoGroups(ag?.groups || []);
+    });
   }, [role]);
+
+  useEffect(() => {
+    if (!preselectedHostIds || preselectedHostIds.length === 0) return;
+    setSelectedHostIds(preselectedHostIds);
+    setNotice(
+      `Zaznaczono ${preselectedHostIds.length} hostów z grupy "${preselectedGroupLabel || 'Smart Group'}" do eksportu (1 IP = 1 Asset).`
+    );
+    onPreselectionConsumed?.();
+  }, [preselectedHostIds, preselectedGroupLabel, onPreselectionConsumed]);
 
   // Synchronizuj listę hostów (z serwerowym wyszukiwaniem dla dużych sieci >10 000 IP)
   useEffect(() => {
@@ -170,6 +207,26 @@ export function DefectDojoTab({ role, hosts = [] }: Props) {
       for (const h of visibleHosts) merged.add(h.id);
       return Array.from(merged);
     });
+  }
+
+  function handleSelectFromGroup(value: string) {
+    setSelectedGroupPreset(value);
+    if (!value) return;
+    if (value.startsWith('saved:')) {
+      const id = value.slice(6);
+      const grp = savedGroups.find((g) => g.id === id);
+      if (grp) {
+        setSelectedHostIds(grp.host_ids);
+        setNotice(`Zaznaczono ${grp.host_ids.length} hostów ze Smart Group "${grp.name}".`);
+      }
+    } else if (value.startsWith('auto:')) {
+      const key = value.slice(5);
+      const grp = autoGroups.find((g) => g.key === key);
+      if (grp) {
+        setSelectedHostIds(grp.host_ids);
+        setNotice(`Zaznaczono ${grp.host_ids.length} hostów z auto-grupy "${grp.label}".`);
+      }
+    }
   }
 
   async function handleExport() {
@@ -419,6 +476,35 @@ export function DefectDojoTab({ role, hosts = [] }: Props) {
                   </div>
                 )}
               </div>
+
+              {canExport && (savedGroups.length > 0 || autoGroups.length > 0) && (
+                <Select
+                  value={selectedGroupPreset}
+                  onChange={(e) => handleSelectFromGroup(e.target.value)}
+                  className="h-8 text-xs font-mono"
+                  aria-label="Zaznacz hosty z grupy automatycznej"
+                >
+                  <option value="">Szybki wybór z grupy (Smart Group / Auto-Grupa)...</option>
+                  {savedGroups.length > 0 && (
+                    <optgroup label="Zapisane Smart Groups">
+                      {savedGroups.map((sg) => (
+                        <option key={sg.id} value={`saved:${sg.id}`}>
+                          [SMART] {sg.name} ({sg.member_count} hostów)
+                        </option>
+                      ))}
+                    </optgroup>
+                  )}
+                  {autoGroups.length > 0 && (
+                    <optgroup label="Auto-wykryte grupy (na żywo)">
+                      {autoGroups.slice(0, 25).map((ag) => (
+                        <option key={ag.key} value={`auto:${ag.key}`}>
+                          [AUTO] {ag.label} ({ag.host_count} hostów)
+                        </option>
+                      ))}
+                    </optgroup>
+                  )}
+                </Select>
+              )}
 
               <div className="relative">
                 <Search className="h-3.5 w-3.5 text-muted-foreground absolute left-2.5 top-1/2 -translate-y-1/2" />

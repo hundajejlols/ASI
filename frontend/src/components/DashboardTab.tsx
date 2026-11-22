@@ -1,6 +1,7 @@
 import {
   Activity,
   AlertCircle,
+  ArrowUpRight,
   CheckCircle2,
   Clock,
   Download,
@@ -27,9 +28,10 @@ interface Props {
   changes: ChangeEvent[];
   summary: DashboardSummary | null;
   onRefresh: () => void;
+  onOpenGroupSearch?: (query: string) => void;
 }
 
-export function DashboardTab({ role, hosts, changes, summary, onRefresh }: Props) {
+export function DashboardTab({ role, hosts, changes, summary, onRefresh, onOpenGroupSearch }: Props) {
   const [busy, setBusy] = useState(false);
   const [exportingFmt, setExportingFmt] = useState<'json' | 'csv' | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -259,9 +261,23 @@ export function DashboardTab({ role, hosts, changes, summary, onRefresh }: Props
                     ({g.sample_endpoints.slice(0, 2).join(', ')})
                   </span>
                 </div>
-                <Badge variant="secondary" className="font-mono shrink-0">
-                  {g.count}
-                </Badge>
+                <div className="flex items-center gap-1 shrink-0">
+                  <Badge variant="secondary" className="font-mono">
+                    {g.count}
+                  </Badge>
+                  {onOpenGroupSearch && groupMode === 'by_technology' && (
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="ghost"
+                      className="h-6 px-1.5 text-[10px]"
+                      title={`Otwórz auto-grupę "${g.key}" w zakładce Groups`}
+                      onClick={() => onOpenGroupSearch(g.key)}
+                    >
+                      <ArrowUpRight className="h-3 w-3" />
+                    </Button>
+                  )}
+                </div>
               </div>
             ))}
             {activeGroups.length === 0 && (

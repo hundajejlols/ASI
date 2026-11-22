@@ -806,4 +806,470 @@ def test_defectdojo_per_ip_asset_export_and_org_mapping(monkeypatch):
         _cleanup()
 
 
+def test_signatures_import_export_tester_and_artifacts():
+    """
+    Testuje rozbudowany moduł sygnatur:
+      - eksport JSON (przenośny format bez UUID, filtry only_enabled/ids, RBAC read_only),
+      - zbiorczy import JSON (dry_run, skip, overwrite, error, normalizacja aliasów, odrzucanie ReDoS/SSRF, import-file),
+      - Live Tester (próbka + test wsteczny na bazie) oraz endpoint observed-artifacts.
+    """
+    from sqlalchemy import select
+    from app.db.models import CustomSignature
+    from app.db.session import SessionLocal
 
+    suffix = uuid4().hex[:6]
+    sig_a = f"TestHdrAlias_{suffix}"
+    sig_b = f"TestPathNoPattern_{suffix}"
+    sig_c = f"TestCookieFile_{suffix}"
+    created_names = [sig_a, sig_b, sig_c]
+
+    def _cleanup():
+        with SessionLocal() as db:
+            rows = db.execute(select(CustomSignature).where(CustomSignature.name.in_(created_names))).scalars().all()
+            for r in rows:
+                db.delete(r)
+            db.commit()
+
+    _cleanup()
+    try:
+        with TestClient(app) as client:
+            admin_hdr = {"X-Dev-Role": "admin"}
+            ro_hdr = {"X-Dev-Role": "read_only"}
+            mod_hdr = {"X-Dev-Role": "modify_read"}
+
+            # 1. RBAC: read_only i modify_read mogą eksportować, ale NIE mogą importować
+            r_exp_ro = client.get("/api/v1/signatures/export?only_enabled=true", headers=ro_hdr)
+            assert r_exp_ro.status_code == 200
+            exp_data = r_exp_ro.json()
+            assert exp_data["schema_version"] == "1.0"
+            assert exp_data["count"] >= 8
+            assert "id" not in exp_data["signatures"][0]
+
+            r_imp_ro = client.post("/api/v1/signatures/import", headers=ro_hdr, json=[{"name": sig_a, "match_type": "cookie", "pattern": "X"}])
+            assert r_imp_ro.status_code == 403
+            r_imp_mod = client.post("/api/v1/signatures/import", headers=mod_hdr, json=[{"name": sig_a, "match_type": "cookie", "pattern": "X"}])
+            assert r_imp_mod.status_code == 403
+
+            # 2. Dry-Run z aliasami pól, pustym patternem dla path_probe oraz 2 błędnymi wpisami (ReDoS i SSRF)
+            import_bundle = {
+                "signatures": [
+                    {
+                        "name": sig_a,
+                        "type": "header_match",
+                        "header_name": "X-Test-Header",
+                        "value": "staging",
+                        "severity": "med",
+                        "enabled": True,
+                    },
+                    {
+                        "name": sig_b,
+                        "type": "path",
+                        "path": "/metrics",
+                        "status": 200,
+                        "pattern": "",
+                        "severity": "low",
+                    },
+                    {
+                        "name": f"BadRE2_{suffix}",
+                        "match_type": "header",
+                        "pattern": "(?=lookahead)bad",
+                    },
+                    {
+                        "name": f"BadSSRF_{suffix}",
+                        "match_type": "path_probe",
+                        "probe_path": "http://169.254.169.254/latest",
+                        "pattern": "meta",
+                    },
+                ]
+            }
+            r_dry = client.post("/api/v1/signatures/import?dry_run=true&on_conflict=skip", headers=admin_hdr, json=import_bundle)
+            assert r_dry.status_code == 200
+            dry = r_dry.json()
+            assert dry["dry_run"] is True
+            assert dry["summary"]["created"] == 2
+            assert dry["summary"]["errors"] == 2
+
+            # Po dry_run nic nie zostało zapisane w bazie
+            with SessionLocal() as db:
+                assert db.execute(select(CustomSignature).where(CustomSignature.name == sig_a)).scalar_one_or_none() is None
+
+            # 3. Faktyczny import (skip) — zapisuje 2 poprawne, raportuje 2 błędy
+            r_imp = client.post("/api/v1/signatures/import?on_conflict=skip", headers=admin_hdr, json=import_bundle)
+            assert r_imp.status_code == 200
+            imp = r_imp.json()
+            assert imp["summary"]["created"] == 2
+            assert imp["summary"]["errors"] == 2
+
+            # 4. Ponowny import w trybie skip -> pomija istniejące
+            r_skip = client.post("/api/v1/signatures/import?on_conflict=skip", headers=admin_hdr, json=import_bundle["signatures"][:2])
+            assert r_skip.status_code == 200
+            assert r_skip.json()["summary"]["skipped"] == 2
+            assert r_skip.json()["summary"]["created"] == 0
+
+            # 5. Tryb error -> 409 i brak zapisu
+            r_err = client.post("/api/v1/signatures/import?on_conflict=error", headers=admin_hdr, json=[{"name": sig_a, "match_type": "cookie", "pattern": "NEW"}])
+            assert r_err.status_code == 409
+
+            # 6. Tryb overwrite -> nadpisuje istniejącą sygnaturę
+            r_over = client.post(
+                "/api/v1/signatures/import?on_conflict=overwrite",
+                headers=admin_hdr,
+                json=[{"name": sig_a, "match_type": "header", "pattern": "(?i)^X-Test-Header:\\s*prod$", "severity": "high", "description": "Updated"}],
+            )
+            assert r_over.status_code == 200
+            assert r_over.json()["summary"]["updated"] == 1
+
+            # 7. Import z pliku (.json)
+            file_json = f'{{"signatures":[{{"name":"{sig_c}","type":"cookie_name","value":"CUSTOM_SESS","severity":"info"}}]}}'
+            r_file = client.post(
+                "/api/v1/signatures/import-file",
+                headers=admin_hdr,
+                files={"file": ("sigs.json", file_json.encode("utf-8"), "application/json")},
+            )
+            assert r_file.status_code == 200
+            assert r_file.json()["summary"]["created"] == 1
+
+            # 8. Eksport konkretnego ID z download=true
+            all_sigs = client.get("/api/v1/signatures", headers=ro_hdr).json()
+            sig_a_obj = next(s for s in all_sigs if s["name"] == sig_a)
+            assert sig_a_obj["severity"] == "high"
+            r_exp_one = client.get(f"/api/v1/signatures/export?ids={sig_a_obj['id']}&download=true", headers=ro_hdr)
+            assert r_exp_one.status_code == 200
+            assert "attachment" in r_exp_one.headers.get("content-disposition", "")
+            assert r_exp_one.json()["count"] == 1
+            assert r_exp_one.json()["signatures"][0]["name"] == sig_a
+
+            # 9. Live Tester (próbka header, path_probe bez patternu, test_against_db)
+            r_test_hdr = client.post(
+                "/api/v1/signatures/test",
+                headers=ro_hdr,
+                json={
+                    "match_type": "header",
+                    "pattern": r"(?i)^X-Powered-By:\s*.*PHP",
+                    "sample_headers": "Server: nginx\nX-Powered-By: PHP/7.4.33",
+                    "test_against_db": True,
+                },
+            )
+            assert r_test_hdr.status_code == 200
+            t_hdr = r_test_hdr.json()
+            assert t_hdr["sample_match"] is True
+            assert "PHP/7.4.33" in (t_hdr["sample_evidence"] or "")
+            assert t_hdr["db_test"]["supported"] is True
+
+            r_test_path = client.post(
+                "/api/v1/signatures/test",
+                headers=ro_hdr,
+                json={
+                    "match_type": "path_probe",
+                    "probe_path": "/metrics",
+                    "expected_status": 200,
+                    "pattern": "",
+                    "sample_status_code": 200,
+                    "test_against_db": True,
+                },
+            )
+            assert r_test_path.status_code == 200
+            assert r_test_path.json()["sample_match"] is True
+            assert r_test_path.json()["db_test"]["supported"] is False
+
+            # 10. Observed artifacts endpoint
+            r_art = client.get("/api/v1/signatures/observed-artifacts", headers=ro_hdr)
+            assert r_art.status_code == 200
+            art = r_art.json()
+            assert "header_names" in art and "cookies" in art and "favicons" in art
+    finally:
+        _cleanup()
+
+
+def test_automatic_groups_smart_groups_targeted_scan_and_port_protection():
+    """
+    Testuje Automatyczne Grupy (Auto-Groups & Smart Groups):
+      - auto-wykrywanie grup dla WordPress i portu 8080,
+      - podgląd łączonych reguł (AND/OR),
+      - CRUD zapisanych Smart Groups + RBAC + podpięcie pod harmonogram,
+      - celowany skan grupy (dry_run z domyślnym pełnym profilem oraz matched_ports),
+      - ochronę nieskanowanych portów w ingest.py (skan samego 8080 nie zamyka otwartego portu 80).
+    """
+    from sqlalchemy import cast, select
+    from sqlalchemy.dialects.postgresql import INET
+    from app.db.models import Host, ScanRun, ScanSchedule, Service, TargetGroup
+    from app.db.session import SessionLocal
+    from app.schemas.contract import HostResult, HTTPFingerprintResult, ScanChunkResult, ServiceResult
+    from app.services.ingest import ingest_scan_result
+    from app.services.seed import ensure_default_group_and_profile
+
+    suffix = uuid4().hex[:6]
+    ip_wp_80 = "198.51.100.141"
+    ip_wp_8080 = "198.51.100.142"
+    ip_apache_8080 = "198.51.100.143"
+    test_ips = [ip_wp_80, ip_wp_8080, ip_apache_8080]
+    grp_name = f"WordPress_Smart_{suffix}"
+    sched_name = f"Sched_WP_{suffix}"
+    created_run_ids: list = []
+
+    def _cleanup():
+        with SessionLocal() as db:
+            sc = db.execute(select(ScanSchedule).where(ScanSchedule.name == sched_name)).scalar_one_or_none()
+            if sc:
+                db.delete(sc)
+            tg = db.execute(select(TargetGroup).where(TargetGroup.name == grp_name)).scalar_one_or_none()
+            if tg:
+                db.delete(tg)
+            for ip in test_ips:
+                h = db.execute(select(Host).where(Host.ip_address == cast(ip, INET))).scalar_one_or_none()
+                if h:
+                    db.delete(h)
+            for rid in created_run_ids:
+                sr = db.get(ScanRun, rid)
+                if sr:
+                    db.delete(sr)
+            db.commit()
+
+    _cleanup()
+    try:
+        now = datetime.now(timezone.utc)
+        seed_run = uuid4()
+        created_run_ids.append(seed_run)
+
+        with SessionLocal() as db:
+            ingest_scan_result(
+                db,
+                ScanChunkResult(
+                    scan_run_id=seed_run,
+                    chunk_id=uuid4(),
+                    worker_id="worker-test",
+                    status="completed",
+                    started_at=now,
+                    finished_at=now,
+                    hosts=[
+                        HostResult(
+                            ip=ip_wp_80,
+                            hostname="wp1.agh.local",
+                            is_up=True,
+                            services=[
+                                ServiceResult(
+                                    port=80,
+                                    protocol="tcp",
+                                    state="open",
+                                    service_name="http",
+                                    product="nginx",
+                                    http=HTTPFingerprintResult(
+                                        url=f"http://{ip_wp_80}:80/",
+                                        scheme="http",
+                                        status_code=200,
+                                        title="AGH Blog",
+                                        technologies=["WordPress", "PHP"],
+                                        is_admin_panel=True,
+                                    ),
+                                ),
+                                ServiceResult(port=22, protocol="tcp", state="open", service_name="ssh", product="OpenSSH"),
+                            ],
+                        ),
+                        HostResult(
+                            ip=ip_wp_8080,
+                            hostname="wp2.agh.local",
+                            is_up=True,
+                            services=[
+                                ServiceResult(
+                                    port=80,
+                                    protocol="tcp",
+                                    state="open",
+                                    service_name="http",
+                                    product="nginx",
+                                    http=HTTPFingerprintResult(
+                                        url=f"http://{ip_wp_8080}:80/",
+                                        scheme="http",
+                                        status_code=200,
+                                        technologies=["nginx"],
+                                    ),
+                                ),
+                                ServiceResult(
+                                    port=8080,
+                                    protocol="tcp",
+                                    state="open",
+                                    service_name="http",
+                                    product="Apache",
+                                    http=HTTPFingerprintResult(
+                                        url=f"http://{ip_wp_8080}:8080/",
+                                        scheme="http",
+                                        status_code=200,
+                                        technologies=["WordPress"],
+                                    ),
+                                ),
+                            ],
+                        ),
+                        HostResult(
+                            ip=ip_apache_8080,
+                            hostname="app8080.agh.local",
+                            is_up=True,
+                            services=[
+                                ServiceResult(
+                                    port=8080,
+                                    protocol="tcp",
+                                    state="open",
+                                    service_name="http",
+                                    product="Apache",
+                                    http=HTTPFingerprintResult(
+                                        url=f"http://{ip_apache_8080}:8080/",
+                                        scheme="http",
+                                        status_code=200,
+                                        technologies=["Apache HTTP Server"],
+                                    ),
+                                )
+                            ],
+                        ),
+                    ],
+                ),
+                is_partial=False,
+            )
+
+        with TestClient(app) as client:
+            admin_hdr = {"X-Dev-Role": "admin"}
+            ro_hdr = {"X-Dev-Role": "read_only"}
+
+            # 1. Auto-wykrywanie grup na żywo (WordPress + Port 8080)
+            r_auto = client.get("/api/v1/groups/auto", headers=ro_hdr)
+            assert r_auto.status_code == 200
+            auto = r_auto.json()
+            by_key = {g["key"]: g for g in auto["groups"]}
+            assert "tech:wordpress" in by_key
+            assert set([ip_wp_80, ip_wp_8080]).issubset(set(by_key["tech:wordpress"]["sample_ips"]))
+            assert "port:8080" in by_key
+            assert set([ip_wp_8080, ip_apache_8080]).issubset(set(by_key["port:8080"]["sample_ips"]))
+
+            # 2. Preview łączonych reguł: WordPress AND port 8080 -> tylko ip_wp_8080
+            r_prev_and = client.post(
+                "/api/v1/groups/preview",
+                headers=ro_hdr,
+                json={"match_mode": "all", "technologies": ["WordPress"], "ports": [8080], "cidr_scope": "198.51.100.140/30"},
+            )
+            assert r_prev_and.status_code == 200
+            assert r_prev_and.json()["ips"] == [ip_wp_8080]
+
+            # WordPress OR port 8080 -> wszystkie 3 testowe hosty
+            r_prev_or = client.post(
+                "/api/v1/groups/preview",
+                headers=ro_hdr,
+                json={"match_mode": "any", "technologies": ["WordPress"], "ports": [8080], "cidr_scope": "198.51.100.140/30"},
+            )
+            assert r_prev_or.status_code == 200
+            assert set(r_prev_or.json()["ips"]) == set(test_ips)
+
+            # 3. RBAC: read_only nie może tworzyć ani skanować grupy
+            assert client.post(
+                "/api/v1/groups",
+                headers=ro_hdr,
+                json={"name": grp_name, "filter_rules": {"technologies": ["WordPress"]}},
+            ).status_code == 403
+            assert client.post(
+                "/api/v1/groups/scan",
+                headers=ro_hdr,
+                json={"filter_rules": {"technologies": ["WordPress"]}, "dry_run": True},
+            ).status_code == 403
+
+            # 4. Zapisanie Smart Group (WordPress w testowym CIDR)
+            r_create = client.post(
+                "/api/v1/groups",
+                headers=admin_hdr,
+                json={
+                    "name": grp_name,
+                    "description": "Hosty z WordPressem",
+                    "environment": "prod",
+                    "filter_rules": {"technologies": ["WordPress"], "cidr_scope": "198.51.100.140/30"},
+                },
+            )
+            assert r_create.status_code == 201
+            grp_data = r_create.json()
+            grp_id = grp_data["id"]
+            assert grp_data["group_type"] == "dynamic"
+            assert grp_data["member_count"] == 2
+            assert set(grp_data["sample_ips"]) == {ip_wp_80, ip_wp_8080}
+
+            # 5. Skan grupy (domyślny tryb = pełny profil, oraz tryb matched_ports)
+            r_scan_prof = client.post(
+                "/api/v1/groups/scan",
+                headers=admin_hdr,
+                json={"group_id": grp_id, "dry_run": True},
+            )
+            assert r_scan_prof.status_code == 200
+            sp = r_scan_prof.json()
+            assert sp["ports_mode"] == "profile"
+            assert sp["matched_hosts_count"] == 2
+            assert set(sp["matched_ips"]) == {ip_wp_80, ip_wp_8080}
+
+            r_scan_8080 = client.post(
+                "/api/v1/groups/scan",
+                headers=admin_hdr,
+                json={"filter_rules": {"ports": [8080], "cidr_scope": "198.51.100.140/30"}, "ports_mode": "matched_ports", "dry_run": True},
+            )
+            assert r_scan_8080.status_code == 200
+            assert r_scan_8080.json()["ports"] == "8080"
+            assert set(r_scan_8080.json()["matched_ips"]) == {ip_wp_8080, ip_apache_8080}
+
+            # 6. Standardowy /scans/start z target_group_id dynamicznej grupy też działa!
+            r_std_start = client.post(
+                "/api/v1/scans/start",
+                headers=admin_hdr,
+                json={"target_group_id": grp_id, "dry_run": True},
+            )
+            assert r_std_start.status_code == 200
+            assert r_std_start.json()["total_target_ips"] == 2
+
+            # 7. Podpięcie Smart Group pod harmonogram cykliczny
+            r_sched = client.post(
+                "/api/v1/schedules",
+                headers=admin_hdr,
+                json={
+                    "name": sched_name,
+                    "target_group_id": grp_id,
+                    "cron_expression": "0 23 * * *",
+                    "window_start": "22:00",
+                    "window_end": "06:00",
+                },
+            )
+            assert r_sched.status_code == 201
+            sched_out = r_sched.json()
+            assert sched_out["target_group_name"] == grp_name
+            assert sched_out["target_group_type"] == "dynamic"
+
+        # 8. Ochrona nieskanowanych portów: skan wyłącznie portu 8080 NIE może zamykać portu 80 na ip_wp_8080!
+        with SessionLocal() as db:
+            default_grp, default_prof = ensure_default_group_and_profile(db)
+            for _ in range(3):
+                rid = uuid4()
+                created_run_ids.append(rid)
+                db.add(
+                    ScanRun(
+                        id=rid,
+                        target_group_id=default_grp.id,
+                        profile_id=default_prof.id,
+                        status="running",
+                        scanned_ports="8080",
+                        total_chunks=1,
+                        completed_chunks=0,
+                    )
+                )
+                db.flush()
+                # Host odpowiada tylko na porcie 8080 (port 80 nie był skanowany!)
+                ingest_scan_result(
+                    db,
+                    ScanChunkResult(
+                        scan_run_id=rid,
+                        chunk_id=uuid4(),
+                        worker_id="worker-test",
+                        status="completed",
+                        started_at=now,
+                        finished_at=now,
+                        hosts=[HostResult(ip=ip_wp_8080, is_up=True, services=[])],
+                    ),
+                    target_cidr=f"{ip_wp_8080}/32",
+                    is_partial=False,
+                )
+
+            h2 = db.execute(select(Host).where(Host.ip_address == cast(ip_wp_8080, INET))).scalar_one()
+            svc_80 = db.execute(select(Service).where(Service.host_id == h2.id, Service.port == 80)).scalar_one()
+            svc_8080 = db.execute(select(Service).where(Service.host_id == h2.id, Service.port == 8080)).scalar_one()
+            assert svc_80.state == "open" and svc_80.missed_scans == 0
+            assert svc_8080.state == "closed" and svc_8080.missed_scans == 3
+    finally:
+        _cleanup()
